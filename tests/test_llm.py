@@ -28,11 +28,13 @@ def _cands():
 def test_rerank_orders_by_llm_and_sets_titles():
     text = json.dumps({"candidates": [
         {"id": 0, "score": 2, "title": "雑談", "reason": "r0", "start": 0, "end": 30},
-        {"id": 1, "score": 10, "title": "神プレイ", "reason": "r1", "start": 105, "end": 135},
+        {"id": 1, "score": 10, "title": "神プレイ", "hook": "まさかの結末", "reason": "r1", "start": 105, "end": 135},
     ]}, ensure_ascii=False)
     client = FakeClient(text)
     out = rerank_with_claude(_cands(), LLMConfig(), "yuuki_ftw", "配信", 15, 59, client=client)
     assert [h.title for h in out] == ["神プレイ", "雑談"]
+    assert out[0].hook == "まさかの結末"
+    assert "hook" in client.kwargs["output_config"]["format"]["schema"]["properties"]["candidates"]["items"]["required"]
     assert (out[0].start, out[0].end) == (105, 135)
     assert client.kwargs["model"] == "claude-opus-5-5"
     assert client.kwargs["output_config"]["format"]["type"] == "json_schema"

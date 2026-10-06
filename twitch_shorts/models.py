@@ -63,6 +63,7 @@ class Highlight:
     score: float
     signals: dict[str, float] = field(default_factory=dict)
     title: str = ""
+    hook: str = ""  # 冒頭に出す「引きの言葉」
     reason: str = ""
     chat_sample: list[str] = field(default_factory=list)
     transcript: str = ""

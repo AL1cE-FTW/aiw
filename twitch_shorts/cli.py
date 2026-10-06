@@ -6,6 +6,7 @@
   twitch-shorts local <動画> --chat <ファイル>  手元の録画ファイルから作る
   twitch-shorts chat <VODのURL/ID>       VOD のチャットを JSONL で保存する
   twitch-shorts analyze <チャンネル>      人気クリップを分析し、レポートと推奨設定を作る
+  twitch-shorts schedule                作ったショートの投稿予定 (毎日決まった時刻に 1 本) を表示
 """
 
 from __future__ import annotations
@@ -167,6 +168,26 @@ def cmd_analyze(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from .schedule import load_schedule
+
+    if args.output:
+        cfg.output_dir = args.output
+    now = datetime.now(ZoneInfo(cfg.publish.timezone))
+    entries = [e for e in load_schedule(cfg) if args.all or datetime.fromisoformat(e["publish_at"]) >= now]
+    if not entries:
+        print("投稿予定はありません")
+        return 0
+    for e in entries:
+        when = e["publish_at"][:16].replace("T", " ")
+        hook = f" 〔{e['hook']}〕" if e.get("hook") else ""
+        print(f"{when}  {e['title']}{hook}\n                  {e['path']}")
+    return 0
+
+
 def cmd_chat(cfg: Config, args: argparse.Namespace) -> int:
     from .chat import fetch_vod_chat, save_chat_jsonl
     from .twitch_api import parse_video_id
@@ -239,6 +260,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--vods", type=int, default=3, help="チャットまで分析する VOD の数 (多いほど時間がかかる)")
     sp.add_argument("-o", "--output", help="出力ディレクトリ")
     sp.set_defaults(func=cmd_analyze)
+
+    sp = sub.add_parser("schedule", help="投稿予定を表示する")
+    sp.add_argument("--all", action="store_true", help="過ぎた予定も表示")
+    sp.add_argument("-o", "--output", help="出力ディレクトリ")
+    sp.set_defaults(func=cmd_schedule)
 
     sp = sub.add_parser("chat", help="VOD のチャットを保存する")
     sp.add_argument("vod")

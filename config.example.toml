@@ -39,6 +39,11 @@ title = true
 subtitles = true        # 文字起こし (transcribe.enabled) が有効なときに字幕を焼き込む
 font = "Noto Sans CJK JP"
 title_template = "{channel} 切り抜き #{index}"   # 使える変数: channel, index, date, top_chat
+# --- ショートの型 (参考: タルレミ・エラ「OW動画投稿講座」) ---
+hook_seconds = 2.0        # 盛り上がりの瞬間を冒頭に先見せする秒数 (0 で無効)
+hook_text_seconds = 3.0   # 引きの言葉 (--llm 時) を表示する秒数
+caption_position = 0.38   # テロップの位置 (画面上端からの割合)。全動画で固定する
+caption_max_chars = 10    # テロップ 1 枚の最大文字数。超えたら次のテロップに分ける
 
 [transcribe]
 enabled = false         # true にするには: pip install 'twitch-shorts[transcribe]'
@@ -56,3 +61,10 @@ rolling_minutes = 0     # >0 で配信中も N 分ごとにショートを作る
 viewer_poll_interval = 60  # 同時視聴者数を記録する間隔 (秒)
 recorder = "auto"       # auto (streamlink があれば優先) / streamlink / yt-dlp
 quality = "best"
+
+[publish]
+# 作ったショートを「毎日同じ時刻に 1 本」の投稿予定表 (output/schedule.csv) に並べる
+enabled = true
+post_time = "19:00"
+posts_per_day = 1         # 解説系以外は 1 日 1 本までが推奨
+timezone = "Asia/Tokyo"

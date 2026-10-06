@@ -29,6 +29,7 @@ Twitch の配信から**盛り上がった場面を自動で見つけて**、You
 | `twitch-shorts local 録画.mp4 --chat chat.json` | 手元の録画ファイル＋チャットログから作る |
 | `twitch-shorts chat <URL or ID>` | VOD のチャットを JSONL で保存するだけ |
 | `twitch-shorts analyze yuuki_ftw` | **よく見られたクリップを分析**し、レポートと推奨設定 (`config.tuned.toml`) を作る |
+| `twitch-shorts schedule` | 作ったショートの**投稿予定** (毎日同じ時刻に 1 本) を表示 |
 
 共通オプション: `-n 本数` / `--layout blur|crop|facecam` / `--transcribe` (字幕) / `--llm` (AI 評価・タイトル) / `--dry-run` (検出のみ)
 
@@ -93,6 +94,25 @@ Settings → Secrets and variables → Actions で以下を設定すると有効
 - Variables: `TWITCH_CHANNEL` (省略時は `yuuki_ftw`)
 
 手動実行 (Run workflow) で VOD の URL を指定することもできます。
+
+## ショートの型
+
+タルレミ・エラさんの note「[OW動画投稿講座](https://note.com/tallemi_ella/n/na6e518039897)」の
+考え方を参考に、作るショートを次の型にそろえています。
+
+| 講座のポイント | このツールでの実装 | 設定 (`[render]` / `[publish]`) |
+| --- | --- | --- |
+| 初手の 3 秒が命。引きのある言葉でスワイプさせない | 盛り上がりの瞬間を**冒頭に 2 秒先見せ**してから本編を流す。`--llm` 時は「引きの言葉」(10 文字以内) を最初の 3 秒に大きく表示 | `hook_seconds`, `hook_text_seconds` |
+| 配置は決めたら絶対に変えない (見慣れた配置が最強のスワイプ防止) | タイトル・テロップの位置とレイアウトは設定で固定し、全動画で同じにする | `layout`, `caption_position` |
+| テロップは真ん中から少し上に固定、10 文字以上なら途中でカット | 字幕・フック文を画面の上から 38% の位置に固定。10 文字を超える発話は句読点で区切って次のテロップに分けて順番に表示 | `caption_position`, `caption_max_chars` |
+| 毎日同じ時間に投稿、解説系以外は 1 日 1 本まで | 作ったショートを良い順に**毎日 19:00 の枠へ 1 本ずつ**割り当てた投稿予定表 (`output/schedule.csv`) を作る | `post_time`, `posts_per_day` |
+| 見るべき指標はインプレッション・スワイプ率・維持率 | 下の「分析」で Twitch 側の実績を使って検出を調整 (YouTube 側の数値の取り込みは今後の拡張候補) | — |
+
+```bash
+twitch-shorts schedule        # これからの投稿予定を表示
+```
+
+※ 字幕は `--transcribe`、引きの言葉は `--llm` を付けたときに入ります (付けない場合も先見せは入ります)。
 
 ## 分析して「みんなが見てくれる」ショートに寄せる
 
@@ -181,3 +201,6 @@ Twitch への通信部分はモックでテストしています。
   <https://platform.claude.com/docs>
 - yt-dlp (`download_ranges` による区間ダウンロード): <https://github.com/yt-dlp/yt-dlp>
 - faster-whisper: <https://github.com/SYSTRAN/faster-whisper>
+- ショートの型 (冒頭 3 秒・配置固定・テロップ位置と文字数・投稿頻度・見るべき指標): タルレミ・エラ
+  「OW動画投稿講座」 <https://note.com/tallemi_ella/n/na6e518039897>
+  (開発環境から本文に直接アクセスできなかったため、検索エンジン経由で確認できた要点に基づいています)

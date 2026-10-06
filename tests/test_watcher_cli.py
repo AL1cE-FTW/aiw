@@ -75,5 +75,20 @@ def test_cli_help_lists_commands(capsys):
     except SystemExit:
         pass
     out = capsys.readouterr().out
-    for cmd in ("vod", "latest", "watch", "local", "chat"):
+    for cmd in ("vod", "latest", "watch", "local", "chat", "analyze", "schedule"):
         assert cmd in out
+
+
+def test_cli_schedule_lists_upcoming(tmp_path, capsys):
+    from twitch_shorts.config import Config
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.schedule import add_to_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    add_to_schedule(cfg, [Highlight(start=0, end=30, peak=5, score=1, title="神回", hook="これ見て",
+                                    output_path="/x/a.mp4")])
+    conf = tmp_path / "c.toml"
+    conf.write_text("")
+    assert cli.main(["-c", str(conf), "schedule", "-o", str(tmp_path / "out")]) == 0
+    out = capsys.readouterr().out
+    assert "神回" in out and "〔これ見て〕" in out and "19:00" in out

@@ -100,4 +100,5 @@ def test_vod_source_renders_from_section_with_offset(make_stream, tmp_path, monk
     [h] = r.highlights
     [(a, b)] = sections
     assert a <= h.start and h.end <= b
-    assert abs(probe_duration(h.output_path) - h.duration) < 0.3
+    # 冒頭の先見せ (hook_seconds) + 本編
+    assert abs(probe_duration(h.output_path) - (h.duration + cfg.render.hook_seconds)) < 0.3
