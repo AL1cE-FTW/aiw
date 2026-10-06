@@ -1,0 +1,71 @@
+# 毎日、チャンネルの最新アーカイブからショート動画を作り、Artifacts にアップロードする。
+# 使うには: リポジトリの Settings → Secrets and variables → Actions で
+#   Secrets:   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET (任意: ANTHROPIC_API_KEY)
+#   Variables: TWITCH_CHANNEL (省略時 yuuki_ftw)
+name: Auto shorts
+
+on:
+  schedule:
+    - cron: "7 21 * * *"   # 毎日 06:07 JST
+  workflow_dispatch:
+    inputs:
+      vod:
+        description: "処理する VOD の URL または ID (空なら最新アーカイブ)"
+        required: false
+
+concurrency: auto-shorts
+
+jobs:
+  shorts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+      TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CHANNEL: ${{ vars.TWITCH_CHANNEL || 'yuuki_ftw' }}
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          if [ -z "$TWITCH_CLIENT_ID" ] || [ -z "$TWITCH_CLIENT_SECRET" ]; then
+            echo "::notice::TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET が未設定のためスキップします"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip != 'true'
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip != 'true'
+        with:
+          python-version: "3.11"
+      - name: Install
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
+          pip install -e '.[llm]'
+      - name: Restore processed VOD list
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: work/processed_vods.json
+          key: processed-${{ github.run_id }}
+          restore-keys: processed-
+      - name: Make shorts
+        if: steps.check.outputs.skip != 'true'
+        env:
+          VOD: ${{ github.event.inputs.vod }}
+        run: |
+          LLM_FLAG=""
+          if [ -n "$ANTHROPIC_API_KEY" ]; then LLM_FLAG="--llm"; fi
+          if [ -n "$VOD" ]; then
+            twitch-shorts vod "$VOD" $LLM_FLAG
+          else
+            twitch-shorts latest "$CHANNEL" --count 1 $LLM_FLAG
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          name: shorts-${{ github.run_number }}
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 30
