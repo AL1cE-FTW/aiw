@@ -1,0 +1,58 @@
+# twitch-shorts 設定ファイルの例。config.toml にコピーして使う (config.toml は .gitignore 済み)。
+# 書かなかった項目はデフォルト値になる。
+# `twitch-shorts analyze` が作る config.tuned.toml を -c で後ろに重ねると、分析結果で上書きできる。
+
+output_dir = "output"
+work_dir = "work"
+
+[twitch]
+# https://dev.twitch.tv/console でアプリを登録して取得 (環境変数 TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET でも可)
+# 無くても動くが、既存クリップのシグナル・latest コマンド・API での配信検知が使えなくなる
+client_id = ""
+client_secret = ""
+
+[detect]
+top_n = 5               # 1 回の処理で作る本数
+min_duration = 15.0     # ショートの最短秒数
+max_duration = 59.0     # 最長秒数 (YouTube Shorts は 60 秒未満が無難)
+pre_roll = 18.0         # 盛り上がりのピークより前に含める秒数 (前フリ)
+post_roll = 8.0         # ピークより後に含める秒数 (リアクション)
+chat_delay = 6.0        # チャットが出来事から遅れて反応する秒数
+min_score = 4.5         # 小さいチャンネルで検出されない場合は 3.0 程度まで下げる
+weight_chat = 1.0
+weight_keywords = 0.8
+weight_audio = 0.6      # 叫び・笑い声などの音量ピーク
+weight_clips = 1.2      # 視聴者が作ったクリップ (API 認証時のみ)
+weight_viewers = 0.5    # 同時視聴者数の増加 (watch モードで API 認証時のみ記録)
+viewer_delay = 30.0     # API の視聴者数の反映遅れ (秒)
+
+[detect.keywords]
+# 既定のキーワード (草, w, KEKW, Pog, クリップ など) に追加・上書き。0 で無効化。
+# 例: チャンネル独自のエモートや、盛り上がった時の定番コメント
+# "yuukiPog" = 1.5
+
+[render]
+layout = "blur"         # blur / crop / facecam
+# facecam レイアウト用: 顔カメラの位置 (元映像に対する比率 x, y, 幅, 高さ)
+facecam = [0.75, 0.70, 0.25, 0.30]
+title = true
+subtitles = true        # 文字起こし (transcribe.enabled) が有効なときに字幕を焼き込む
+font = "Noto Sans CJK JP"
+title_template = "{channel} 切り抜き #{index}"   # 使える変数: channel, index, date, top_chat
+
+[transcribe]
+enabled = false         # true にするには: pip install 'twitch-shorts[transcribe]'
+model = "small"         # tiny / base / small / medium / large-v3
+language = "ja"
+
+[llm]
+enabled = false         # true にするには: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY
+model = "claude-opus-5-5"
+effort = "medium"
+
+[watch]
+poll_interval = 60      # 配信開始チェックの間隔 (秒)
+rolling_minutes = 0     # >0 で配信中も N 分ごとにショートを作る
+viewer_poll_interval = 60  # 同時視聴者数を記録する間隔 (秒)
+recorder = "auto"       # auto (streamlink があれば優先) / streamlink / yt-dlp
+quality = "best"
