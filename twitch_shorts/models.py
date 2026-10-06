@@ -28,6 +28,14 @@ class ChatMessage:
 
 
 @dataclass
+class ViewerSample:
+    """ある時点 (offset 秒) の同時視聴者数。"""
+
+    offset: float
+    viewers: int
+
+
+@dataclass
 class ClipRef:
     """視聴者が作成した既存のTwitchクリップ(VOD上の位置つき)。"""
 

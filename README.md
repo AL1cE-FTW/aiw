@@ -6,7 +6,8 @@ Twitch の配信から**盛り上がった場面を自動で見つけて**、You
 ```
 配信/VOD ─┬─ チャット (流速・「草」「KEKW」「クリップ」等のワード)
           ├─ 音声 (叫び・笑い声などの音量ピーク)
-          └─ 視聴者が作った既存クリップ (Twitch API)
+          ├─ 視聴者が作った既存クリップ (Twitch API)
+          └─ 同時視聴者数の増加 (watch モードで記録)
                  │
                  ▼  各シグナルを「平常時からのずれ」に正規化して合成 → ピーク検出
           ハイライト候補
@@ -27,6 +28,7 @@ Twitch の配信から**盛り上がった場面を自動で見つけて**、You
 | `twitch-shorts vod <URL or ID>` | 指定した VOD を処理 |
 | `twitch-shorts local 録画.mp4 --chat chat.json` | 手元の録画ファイル＋チャットログから作る |
 | `twitch-shorts chat <URL or ID>` | VOD のチャットを JSONL で保存するだけ |
+| `twitch-shorts analyze yuuki_ftw` | **よく見られたクリップを分析**し、レポートと推奨設定 (`config.tuned.toml`) を作る |
 
 共通オプション: `-n 本数` / `--layout blur|crop|facecam` / `--transcribe` (字幕) / `--llm` (AI 評価・タイトル) / `--dry-run` (検出のみ)
 
@@ -83,14 +85,45 @@ twitch-shorts vod https://www.twitch.tv/videos/1234567890 -n 3 --layout facecam
 
 ### GitHub Actions で全自動 (サーバー不要)
 
-`.github/workflows/auto-shorts.yml` が毎日 06:07 (JST) に最新アーカイブを処理し、
-できた動画を Actions の Artifacts にアップロードします。リポジトリの
+`.github/workflows/auto-shorts.yml` が毎日 06:07 (JST) に人気クリップを分析して検出設定を調整し、
+その設定で最新アーカイブを処理して、動画と分析レポートを Actions の Artifacts にアップロードします。リポジトリの
 Settings → Secrets and variables → Actions で以下を設定すると有効になります。
 
 - Secrets: `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` (任意で `ANTHROPIC_API_KEY`)
 - Variables: `TWITCH_CHANNEL` (省略時は `yuuki_ftw`)
 
 手動実行 (Run workflow) で VOD の URL を指定することもできます。
+
+## 分析して「みんなが見てくれる」ショートに寄せる
+
+Twitch のダッシュボードの分析データは API で取得できないため、公式 API で取れる
+**視聴者が作ったクリップとその再生数**を「みんなが見たがった場面」の実績として分析します。
+
+```bash
+twitch-shorts analyze yuuki_ftw --days 60 --vods 3
+# → output/analysis_yuuki_ftw_YYYYMMDD/report.md, analysis.json, config.tuned.toml
+
+# 推奨設定を自分の設定に重ねて使う (後に書いた方が優先)
+twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_YYYYMMDD/config.tuned.toml latest yuuki_ftw
+```
+
+レポートでわかること:
+
+- よく見られているクリップの一覧、長さ・配信内の位置 (序盤/中盤/終盤)・ゲーム・曜日/時間帯ごとの再生数
+- 人気クリップの場面で強く出ていたシグナル (チャット流速 / 盛り上がりワードなど) → 重みを調整
+- 人気の場面のチャットに特徴的な言葉・エモート (チャンネル独自のエモートなど) → 盛り上がりワードに追加
+- 盛り上がりのピークがクリップのどこにあるか → 前フリ (`pre_roll`) / 余韻 (`post_roll`) の長さを調整
+- 答え合わせ: 現在の設定と推奨設定で、人気クリップの場面をいくつ検出できるか
+- 次の動画づくりのヒント (はっきり差が出た項目だけを文章で提示)
+
+「人気」は期間内の再生数上位 25% (最低 3 本) のクリップです。VOD が削除済みのクリップはチャット分析から除外します。
+
+### 同時視聴者数
+
+`watch` モードでは、Twitch API の認証情報があれば配信中の同時視聴者数を 1 分ごとに記録し
+(`work/<チャンネル>/<日時>/viewers.jsonl`)、**視聴者が増えた場面**を検出のシグナルに加えます。
+数人程度の出入りは無視し、API の反映遅れ (`viewer_delay`) も補正します。
+記録したファイルは `local --viewers viewers.jsonl` でも使えます。
 
 ## レイアウト
 
@@ -140,6 +173,8 @@ Twitch への通信部分はモックでテストしています。
   <https://dev.twitch.tv/docs/api/reference/>
 - `Get Clips` のフィールド (`vod_offset` 等) の確認: Twurple の HelixClip ドキュメント
   <https://twurple.js.org/reference/api/classes/HelixClip.html>
+- Twitch API でダッシュボードの分析データが取得できないこと: Twitch Developer Forums
+  「Access Channel Analytics via API」 <https://discuss.dev.twitch.com/t/access-channel-analytics-via-api/16642>
 - VOD チャットを GQL で `contentOffsetSeconds` によりページングする方式: twitch-vod-lib
   <https://pypi.org/project/twitch-vod-lib/>
 - Claude API (構造化出力 `output_config.format`、`fallbacks`): Anthropic 公式 SDK ドキュメント

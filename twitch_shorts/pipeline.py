@@ -15,7 +15,7 @@ import numpy as np
 from . import audio as audio_mod
 from .config import Config
 from .detector import detect_highlights, snap_to_transcript
-from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment
+from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample
 from .render import render_highlight
 
 log = logging.getLogger(__name__)
@@ -103,6 +103,7 @@ def process(
     available_until: float | None = None,
     dry_run: bool = False,
     llm_client=None,
+    viewers: list[ViewerSample] | None = None,
 ) -> RunResult:
     """ハイライトを検出し、ショート動画を ``run_dir`` に書き出す。
 
@@ -125,12 +126,14 @@ def process(
             duration = chat[-1].offset + 1
         else:
             raise ValueError("動画の長さが分かりません")
-    if not chat and loudness is None and not clips:
+    if not chat and loudness is None and not clips and not viewers:
         raise ValueError("チャット・音声・クリップのいずれも無いため検出できません")
 
     n_target = cfg.detect.top_n
     n_candidates = n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1) + len(exclude) * 2
-    candidates, score = detect_highlights(duration, chat, cfg.detect, loudness, clips, top_n=n_candidates)
+    candidates, score = detect_highlights(
+        duration, chat, cfg.detect, loudness, clips, top_n=n_candidates, viewers=viewers
+    )
     candidates = [
         h for h in candidates
         if not any(h.overlaps(e, margin=5) for e in exclude)

@@ -22,3 +22,13 @@ def test_unknown_key_is_rejected(tmp_path):
     p.write_text("[detect]\ntopn = 3\n")
     with pytest.raises(ValueError):
         load_config(p)
+
+
+def test_multiple_configs_are_layered(tmp_path):
+    a = tmp_path / "a.toml"
+    a.write_text('[detect]\ntop_n = 3\npre_roll = 10.0\n[render]\nlayout = "crop"\n')
+    b = tmp_path / "b.toml"
+    b.write_text('[detect]\npre_roll = 22.0\n[detect.keywords]\n"yuukipog" = 1.5\n')
+    cfg = load_config([a, b])
+    assert (cfg.detect.top_n, cfg.detect.pre_roll, cfg.render.layout) == (3, 22.0, "crop")
+    assert cfg.detect.keywords["yuukipog"] == 1.5

@@ -30,7 +30,13 @@ def test_record_and_process_with_mocked_stream(make_stream, tmp_path, monkeypatc
     monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
     cfg.render.width, cfg.render.height = 360, 640
-    done = watcher.record_and_process(cfg, "yuuki_ftw")
+    class FakeHelix:
+        def get_stream(self, login):
+            return {"viewer_count": 12}
+
+    done = watcher.record_and_process(cfg, "yuuki_ftw", helix=FakeHelix())
+    [viewers_log] = list((tmp_path / "work" / "yuuki_ftw").glob("*/viewers.jsonl"))
+    assert '"viewers": 12' in viewers_log.read_text()
     assert len(done) == 1
     assert done[0].start <= 54 <= done[0].end
     assert probe_video_size(done[0].output_path) == (360, 640)

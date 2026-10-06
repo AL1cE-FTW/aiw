@@ -1,5 +1,6 @@
 # twitch-shorts 設定ファイルの例。config.toml にコピーして使う (config.toml は .gitignore 済み)。
 # 書かなかった項目はデフォルト値になる。
+# `twitch-shorts analyze` が作る config.tuned.toml を -c で後ろに重ねると、分析結果で上書きできる。
 
 output_dir = "output"
 work_dir = "work"
@@ -22,6 +23,8 @@ weight_chat = 1.0
 weight_keywords = 0.8
 weight_audio = 0.6      # 叫び・笑い声などの音量ピーク
 weight_clips = 1.2      # 視聴者が作ったクリップ (API 認証時のみ)
+weight_viewers = 0.5    # 同時視聴者数の増加 (watch モードで API 認証時のみ記録)
+viewer_delay = 30.0     # API の視聴者数の反映遅れ (秒)
 
 [detect.keywords]
 # 既定のキーワード (草, w, KEKW, Pog, クリップ など) に追加・上書き。0 で無効化。
@@ -50,5 +53,6 @@ effort = "medium"
 [watch]
 poll_interval = 60      # 配信開始チェックの間隔 (秒)
 rolling_minutes = 0     # >0 で配信中も N 分ごとにショートを作る
+viewer_poll_interval = 60  # 同時視聴者数を記録する間隔 (秒)
 recorder = "auto"       # auto (streamlink があれば優先) / streamlink / yt-dlp
 quality = "best"

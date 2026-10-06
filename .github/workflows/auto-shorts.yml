@@ -1,4 +1,5 @@
-# 毎日、チャンネルの最新アーカイブからショート動画を作り、Artifacts にアップロードする。
+# 毎日、チャンネルの人気クリップを分析して検出設定を調整し、その設定で最新アーカイブから
+# ショート動画を作って、動画と分析レポートを Artifacts にアップロードする。
 # 使うには: リポジトリの Settings → Secrets and variables → Actions で
 #   Secrets:   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET (任意: ANTHROPIC_API_KEY)
 #   Variables: TWITCH_CHANNEL (省略時 yuuki_ftw)
@@ -43,13 +44,22 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
           pip install -e '.[llm]'
-      - name: Restore processed VOD list
+      - name: Restore processed VOD list and chat cache
         if: steps.check.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
-          path: work/processed_vods.json
-          key: processed-${{ github.run_id }}
-          restore-keys: processed-
+          path: |
+            work/processed_vods.json
+            work/vod_*/chat.jsonl
+          key: work-${{ github.run_id }}
+          restore-keys: work-
+      - name: Analyze popular clips
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # 分析に失敗してもショート作成は既定の設定で続ける
+          if twitch-shorts analyze "$CHANNEL" --vods 2 -o output/analysis; then
+            echo "TUNED=-c output/analysis/config.tuned.toml" >> "$GITHUB_ENV"
+          fi
       - name: Make shorts
         if: steps.check.outputs.skip != 'true'
         env:
@@ -58,10 +68,13 @@ jobs:
           LLM_FLAG=""
           if [ -n "$ANTHROPIC_API_KEY" ]; then LLM_FLAG="--llm"; fi
           if [ -n "$VOD" ]; then
-            twitch-shorts vod "$VOD" $LLM_FLAG
+            twitch-shorts $TUNED vod "$VOD" $LLM_FLAG
           else
-            twitch-shorts latest "$CHANNEL" --count 1 $LLM_FLAG
+            twitch-shorts $TUNED latest "$CHANNEL" --count 1 $LLM_FLAG
           fi
+      - name: Drop large downloads before caching
+        if: always() && steps.check.outputs.skip != 'true'
+        run: rm -rf work/vod_*/audio.* work/vod_*/sections work/vod_*/video.*
       - uses: actions/upload-artifact@v4
         if: steps.check.outputs.skip != 'true'
         with:

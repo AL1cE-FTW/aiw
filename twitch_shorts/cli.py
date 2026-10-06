@@ -5,6 +5,7 @@
   twitch-shorts watch <チャンネル>        配信を監視して録画し、自動でショート動画を作る
   twitch-shorts local <動画> --chat <ファイル>  手元の録画ファイルから作る
   twitch-shorts chat <VODのURL/ID>       VOD のチャットを JSONL で保存する
+  twitch-shorts analyze <チャンネル>      人気クリップを分析し、レポートと推奨設定を作る
 """
 
 from __future__ import annotations
@@ -129,10 +130,40 @@ def cmd_local(cfg: Config, args: argparse.Namespace) -> int:
         from .models import ClipRef
 
         clips = [ClipRef(**c) for c in json.loads(Path(args.clips).read_text(encoding="utf-8"))]
+    viewers = None
+    if args.viewers:
+        from .viewers import load_viewers
+
+        viewers = load_viewers(args.viewers)
     out = Path(cfg.output_dir) / (args.name or Path(args.video).stem)
     result = process(cfg, LocalSource(args.video), chat, out, clips=clips, channel=args.channel or "",
-                     stream_title=args.title or "", dry_run=args.dry_run)
+                     stream_title=args.title or "", dry_run=args.dry_run, viewers=viewers)
     _print_result(result.highlights)
+    return 0
+
+
+def cmd_analyze(cfg: Config, args: argparse.Namespace) -> int:
+    from datetime import datetime
+
+    from .analytics import analyze_channel, hints, write_outputs
+    from .twitch_api import HelixClient
+
+    if not (cfg.twitch.client_id and cfg.twitch.client_secret):
+        print("analyze コマンドには TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET が必要です", file=sys.stderr)
+        return 2
+    helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
+    channel = args.channel.lower()
+    result = analyze_channel(cfg, helix, channel, days=args.days, max_vods=args.vods)
+    out = Path(args.output or Path(cfg.output_dir) / f"analysis_{channel}_{datetime.now():%Y%m%d}")
+    paths = write_outputs(result, out)
+    print(f"クリップ {len(result.clips)} 本を分析しました")
+    for h in hints(result):
+        print(f"  ・{h}")
+    if result.backtest:
+        b = result.backtest
+        print(f"  人気クリップの検出数: 現在の設定 {b['before']}/{b['popular_clips']} → 推奨設定 {b['after']}/{b['popular_clips']}")
+    print(f"レポート: {paths['report']}")
+    print(f"推奨設定: {paths['config']}  (使い方: twitch-shorts -c {paths['config']} ...)")
     return 0
 
 
@@ -150,7 +181,8 @@ def cmd_chat(cfg: Config, args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="twitch-shorts", description="Twitch 配信の盛り上がりを自動でショート動画にする")
-    p.add_argument("-c", "--config", help="設定ファイル (TOML)。省略時は ./config.toml があれば使う")
+    p.add_argument("-c", "--config", action="append",
+                   help="設定ファイル (TOML)。複数指定すると後のものが優先。省略時は ./config.toml があれば使う")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -194,11 +226,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("video")
     sp.add_argument("--chat", help="チャットファイル (JSONL / TwitchDownloader JSON など)")
     sp.add_argument("--clips", help="既存クリップ情報の JSON ([{offset, duration, views}])")
+    sp.add_argument("--viewers", help="同時視聴者数の記録 (watch モードの viewers.jsonl や offset,viewers の CSV)")
     sp.add_argument("--channel")
     sp.add_argument("--title", help="配信タイトル (LLM への文脈)")
     sp.add_argument("--name", help="出力サブディレクトリ名")
     add_render_opts(sp)
     sp.set_defaults(func=cmd_local)
+
+    sp = sub.add_parser("analyze", help="人気クリップを分析し、レポートと推奨設定を作る")
+    sp.add_argument("channel")
+    sp.add_argument("--days", type=int, default=60, help="何日前までのクリップを対象にするか")
+    sp.add_argument("--vods", type=int, default=3, help="チャットまで分析する VOD の数 (多いほど時間がかかる)")
+    sp.add_argument("-o", "--output", help="出力ディレクトリ")
+    sp.set_defaults(func=cmd_analyze)
 
     sp = sub.add_parser("chat", help="VOD のチャットを保存する")
     sp.add_argument("vod")
@@ -214,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    config_path = args.config or ("config.toml" if Path("config.toml").exists() else None)
+    config_path = args.config or (["config.toml"] if Path("config.toml").exists() else None)
     cfg = load_config(config_path)
     _common_overrides(cfg, args)
     try:

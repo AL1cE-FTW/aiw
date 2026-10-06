@@ -6,6 +6,7 @@
      - keywords: 「草」「pog」「クリップ」等の盛り上がりワードの重み合計
      - audio:    配信音声の音量 (dB)
      - clips:    視聴者が作った既存クリップの範囲 (再生数で重み付け)
+     - viewers:  同時視聴者数の増加率 (watch モードで記録した場合)
   2. chat / keywords は反応の遅れ (chat_delay) の分だけ前にずらす
   3. 各シグナルを「その時間帯の平常値」からのずれ (ロバスト z 値) に正規化して重み付き合計
   4. スコアの高い順にピークを取り、前後に余白を付けて 15〜59 秒の区間にする
@@ -19,9 +20,12 @@ from collections import Counter
 import numpy as np
 
 from .config import DetectConfig
-from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment
+from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample
 
 BASELINE_WINDOW = 300  # 平常値を計算する窓(秒)。配信が進むとチャットが増える傾向を吸収する
+VIEWER_NOISE_MIN = 3.0  # 視聴者数の自然な揺らぎ (人)
+VIEWER_NOISE_RATIO = 0.05  # 〃 (典型的な視聴者数に対する割合)
+VIEWER_GROWTH_UNIT = 0.05  # 窓内で 5% 増えたらスコア 1 とする
 
 
 def moving_average(x: np.ndarray, window: float) -> np.ndarray:
@@ -61,6 +65,7 @@ def build_signals(
     cfg: DetectConfig,
     loudness: np.ndarray | None = None,
     clips: list[ClipRef] | None = None,
+    viewers: list[ViewerSample] | None = None,
 ) -> dict[str, np.ndarray]:
     n = max(1, int(math.ceil(duration)))
     chat_users = np.zeros(n)
@@ -91,7 +96,30 @@ def build_signals(
             b = min(n, int(math.ceil(c.offset + max(c.duration, 1))))
             clip_sig[a:b] += 1.0 + math.log1p(max(c.views, 0))
         signals["clips"] = clip_sig
+
+    if viewers and len(viewers) >= 2:
+        signals["viewers"] = viewer_growth(viewers, n, cfg)
     return signals
+
+
+def viewer_growth(viewers: list[ViewerSample], n: int, cfg: DetectConfig) -> np.ndarray:
+    """同時視聴者数の増加率 (窓の前後の差 ÷ 配信の典型的な視聴者数) を 1 秒刻みで返す。
+
+    数分おきのサンプルを線形補間し、API 反映の遅れ (viewer_delay) だけ前にずらしてから、
+    各時刻 t について v(t + 窓/2) - v(t - 窓/2) を見る。視聴者が増えていく場面ほど値が大きい。
+    """
+    pts = sorted(viewers, key=lambda v: v.offset)
+    xs = np.array([v.offset - cfg.viewer_delay for v in pts], dtype=np.float64)
+    ys = np.array([v.viewers for v in pts], dtype=np.float64)
+    t = np.arange(n, dtype=np.float64)
+    half = cfg.viewer_window / 2
+    # 記録範囲の外は端の値で延長される (= 増減 0 とみなす)
+    diff = np.interp(t + half, xs, ys) - np.interp(t - half, xs, ys)
+    typical = max(float(np.median(ys)), 1.0)
+    # 数人程度の出入りは常に起きるので、その分は増減と見なさない
+    floor = max(VIEWER_NOISE_MIN, VIEWER_NOISE_RATIO * typical)
+    diff = np.sign(diff) * np.maximum(np.abs(diff) - floor, 0.0)
+    return diff / typical
 
 
 def combine_signals(signals: dict[str, np.ndarray], cfg: DetectConfig) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -101,6 +129,7 @@ def combine_signals(signals: dict[str, np.ndarray], cfg: DetectConfig) -> tuple[
         "keywords": cfg.weight_keywords,
         "audio": cfg.weight_audio,
         "clips": cfg.weight_clips,
+        "viewers": cfg.weight_viewers,
     }
     normed: dict[str, np.ndarray] = {}
     n = len(next(iter(signals.values())))
@@ -110,6 +139,9 @@ def combine_signals(signals: dict[str, np.ndarray], cfg: DetectConfig) -> tuple[
             # クリップは疎なので z 値ではなく最大値で 0〜4 に正規化する
             mx = raw.max()
             z = raw / mx * 4.0 if mx > 0 else raw
+        elif name == "viewers":
+            # 視聴者数はもともと滑らかなので z 値化せず、増加率をそのままスコアにする
+            z = raw / VIEWER_GROWTH_UNIT
         elif name == "audio":
             # 音量は短い窓で均してから z 値化 (BGM や瞬間的なノイズに引っ張られすぎないように)
             z = local_zscore(moving_average(raw, 3))
@@ -153,9 +185,10 @@ def detect_highlights(
     loudness: np.ndarray | None = None,
     clips: list[ClipRef] | None = None,
     top_n: int | None = None,
+    viewers: list[ViewerSample] | None = None,
 ) -> tuple[list[Highlight], np.ndarray]:
     """ハイライト候補をスコア順に返す。2 番目の戻り値はスコア系列 (可視化・デバッグ用)。"""
-    signals = build_signals(duration, chat, cfg, loudness, clips)
+    signals = build_signals(duration, chat, cfg, loudness, clips, viewers)
     score, normed = combine_signals(signals, cfg)
     n = len(score)
     limit = top_n if top_n is not None else cfg.top_n

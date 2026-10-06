@@ -58,6 +58,12 @@ class DetectConfig:
     weight_keywords: float = 0.8
     weight_audio: float = 0.6
     weight_clips: float = 1.2
+    # 同時視聴者数の増加 (watch モードで記録した場合のみ)
+    weight_viewers: float = 0.5
+    # 視聴者数の増減を見る窓 (秒)。この幅で前後を比べて増加率を出す
+    viewer_window: float = 120.0
+    # API の視聴者数は実際より遅れて反映されるので、その分だけ前にずらす
+    viewer_delay: float = 30.0
     # チャットは出来事から数秒遅れて反応するので、その分だけ前にずらす
     chat_delay: float = 6.0
     smooth_seconds: float = 8.0
@@ -122,6 +128,8 @@ class WatchConfig:
     poll_interval: int = 60
     # 0 なら配信終了後にまとめて処理。>0 なら配信中もN分ごとに新しいハイライトを書き出す
     rolling_minutes: int = 0
+    # 同時視聴者数を記録する間隔 (秒)。Twitch API の認証情報がある場合のみ記録する
+    viewer_poll_interval: int = 60
     recorder: str = "auto"  # auto / streamlink / yt-dlp
     quality: str = "best"
 
@@ -157,10 +165,13 @@ def _apply(obj, data: dict, path: str = "") -> None:
             setattr(obj, key, value)
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
+def load_config(path: str | os.PathLike | list | None = None) -> Config:
+    """設定を読み込む。複数指定した場合は後のファイルが前のファイルを上書きする
+    (例: 自分の config.toml の上に analyze で作った config.tuned.toml を重ねる)。"""
     cfg = Config()
-    if path:
-        with open(path, "rb") as f:
+    paths = path if isinstance(path, (list, tuple)) else [path] if path else []
+    for p in paths:
+        with open(p, "rb") as f:
             _apply(cfg, tomllib.load(f))
     # 秘密情報は環境変数を優先できるようにする
     cfg.twitch.client_id = os.environ.get("TWITCH_CLIENT_ID", cfg.twitch.client_id)

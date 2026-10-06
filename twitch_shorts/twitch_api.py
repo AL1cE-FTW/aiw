@@ -148,34 +148,57 @@ class HelixClient:
         data = self._get("videos", {"user_id": user_id, "type": "archive", "first": max(1, min(count, 100))})["data"]
         return [_video_from_json(v) for v in data]
 
-    def is_live(self, login: str) -> bool:
-        return bool(self._get("streams", {"user_login": login.lower()})["data"])
+    def get_stream(self, login: str) -> dict | None:
+        """配信中ならストリーム情報 (viewer_count, title, started_at など)、オフラインなら None。"""
+        data = self._get("streams", {"user_login": login.lower()})["data"]
+        return data[0] if data else None
 
-    def get_clips_for_video(self, video: VideoInfo, max_pages: int = 10) -> list[ClipRef]:
-        """VOD の配信時間帯に作られたクリップのうち、その VOD に紐づくものを返す。"""
+    def is_live(self, login: str) -> bool:
+        return self.get_stream(login) is not None
+
+    def get_clips(self, broadcaster_id: str, started_at: datetime, ended_at: datetime,
+                  max_pages: int = 10) -> list[dict]:
+        """期間内に作られたクリップ (生の JSON)。ended_at を省略すると 1 週間に制限されるので常に指定する。"""
         params = {
-            "broadcaster_id": video.user_id,
-            "started_at": to_rfc3339(video.created_at),
-            "ended_at": to_rfc3339(video.created_at + timedelta(seconds=video.duration + 3600)),
+            "broadcaster_id": broadcaster_id,
+            "started_at": to_rfc3339(started_at),
+            "ended_at": to_rfc3339(ended_at),
             "first": 100,
         }
-        clips: list[ClipRef] = []
+        out: list[dict] = []
         for _ in range(max_pages):
             body = self._get("clips", params)
-            for c in body.get("data", []):
-                if c.get("video_id") != video.id or c.get("vod_offset") is None:
-                    continue
-                clips.append(
-                    ClipRef(
-                        offset=float(c["vod_offset"]),
-                        duration=float(c.get("duration") or 30),
-                        views=int(c.get("view_count") or 0),
-                        title=c.get("title", ""),
-                        url=c.get("url", ""),
-                    )
-                )
+            out.extend(body.get("data", []))
             cursor = body.get("pagination", {}).get("cursor")
             if not cursor:
                 break
             params = {**params, "after": cursor}
-        return clips
+        return out
+
+    def get_clips_for_video(self, video: VideoInfo, max_pages: int = 10) -> list[ClipRef]:
+        """VOD の配信時間帯に作られたクリップのうち、その VOD に紐づくものを返す。"""
+        raw = self.get_clips(
+            video.user_id,
+            video.created_at,
+            video.created_at + timedelta(seconds=video.duration + 3600),
+            max_pages,
+        )
+        return [
+            ClipRef(
+                offset=float(c["vod_offset"]),
+                duration=float(c.get("duration") or 30),
+                views=int(c.get("view_count") or 0),
+                title=c.get("title", ""),
+                url=c.get("url", ""),
+            )
+            for c in raw
+            if c.get("video_id") == video.id and c.get("vod_offset") is not None
+        ]
+
+    def get_game_names(self, game_ids: list[str]) -> dict[str, str]:
+        ids = sorted({g for g in game_ids if g})
+        names: dict[str, str] = {}
+        for i in range(0, len(ids), 100):
+            body = self._get("games", [("id", g) for g in ids[i : i + 100]])
+            names.update({g["id"]: g["name"] for g in body.get("data", [])})
+        return names
