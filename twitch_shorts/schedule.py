@@ -50,7 +50,8 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
     used = Counter(datetime.fromisoformat(e["publish_at"]).astimezone(tz).isoformat() for e in entries)
 
     added: list[dict] = []
-    day = now.date()
+    # 1 日複数本のとき、前日の枠の一部は今日の早い時間にある (例: 19:00 と翌 07:00) ので前日から探す
+    day = now.date() - timedelta(days=1)
     for h in sorted(highlights, key=lambda h: h.score, reverse=True):
         if not h.output_path or h.output_path in known:
             continue
@@ -69,7 +70,7 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
             "hook": h.hook,
             "channel": channel,
             "score": h.score,
-            "duration": round(h.duration, 1),
+            "duration": round(h.video_duration or h.duration, 1),
             "path": h.output_path,
             "signals": h.signals,  # YouTube の結果と突き合わせて検出を調整するため (feedback コマンド)
         }

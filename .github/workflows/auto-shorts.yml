@@ -45,29 +45,35 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
           pip install -e '.[llm]'
-      - name: Restore processed VOD list, chat cache and posting schedule
+      - name: Restore processed VOD list and chat cache
         if: steps.check.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
           path: |
             work/processed_vods.json
             work/vod_*/chat.jsonl
-            output/schedule.json
           key: work-${{ github.run_id }}
           restore-keys: work-
-      - name: Apply YouTube results
-        if: steps.check.outputs.skip != 'true' && hashFiles('feedback/youtube.csv') != ''
-        run: |
-          # 投稿したショートの結果 (YouTube Studio のエクスポート) を検出設定に反映する
-          if twitch-shorts feedback feedback/youtube.csv -o output/feedback; then
-            echo "FEEDBACK=-c output/feedback/config.feedback.toml" >> "$GITHUB_ENV"
-          fi
+      - name: Restore posting schedule
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: output/schedule.json
+          key: schedule-${{ github.run_id }}
+          restore-keys: schedule-
       - name: Analyze popular clips
         if: steps.check.outputs.skip != 'true'
         run: |
           # 分析に失敗してもショート作成は既定の設定で続ける
           if twitch-shorts analyze "$CHANNEL" --vods 2 -o output/analysis; then
             echo "TUNED=-c output/analysis/config.tuned.toml" >> "$GITHUB_ENV"
+          fi
+      - name: Apply YouTube results
+        if: steps.check.outputs.skip != 'true' && hashFiles('feedback/youtube.csv') != ''
+        run: |
+          # 投稿したショートの結果 (YouTube Studio のエクスポート) を、分析で調整した設定を土台に反映する
+          if twitch-shorts $TUNED feedback feedback/youtube.csv -o output/feedback; then
+            echo "FEEDBACK=-c output/feedback/config.feedback.toml" >> "$GITHUB_ENV"
           fi
       - name: Make shorts
         if: steps.check.outputs.skip != 'true'

@@ -119,3 +119,17 @@ def test_cli_feedback(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "一致: 6 本" in out and "スワイプ率" in out and "推奨設定" in out
     assert (tmp_path / "fbo" / "report.md").exists()
+
+
+def test_template_titles_with_numbers_are_not_confused(tmp_path):
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    hs = [Highlight(start=0, end=30, peak=5, score=1, title=f"yuuki_ftw 切り抜き #{i}", output_path=f"/x/{i}.mp4")
+          for i in (1, 2, 12)]
+    add_to_schedule(cfg, hs)
+    p = tmp_path / "t.csv"
+    p.write_text("Content,Video title,Stayed to watch (%)\n"
+                 "a,yuuki_ftw 切り抜き #12 #shorts,70\nb,yuuki_ftw 切り抜き #1 #shorts,60\n"
+                 "c,yuuki_ftw 切り抜き #2,50\n", encoding="utf-8")
+    rows, _ = load_youtube_csv(p)
+    assert match_shorts(rows, our_shorts(cfg)) == 3
+    assert {r.video_id: r.matched_path for r in rows} == {"a": "/x/12.mp4", "b": "/x/1.mp4", "c": "/x/2.mp4"}

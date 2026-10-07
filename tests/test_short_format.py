@@ -86,3 +86,54 @@ def test_schedule_today_slot_if_not_passed_and_multiple_per_day(tmp_path):
     assert [e["publish_at"][:16] for e in added] == ["2026-10-06T19:00", "2026-10-07T07:00", "2026-10-07T19:00"]
     data = json.loads((tmp_path / "out" / "schedule.json").read_text(encoding="utf-8"))
     assert [d["title"] for d in data] == ["3", "2", "1"]
+
+
+# --- レビュー指摘の回帰テスト -------------------------------------------------
+
+def test_trim_never_cuts_the_peak(make_stream, tmp_path):
+    video, _ = make_stream(duration=80, events=(10,))
+    cfg = RenderConfig(width=360, height=640, title_font_size=30, subtitle_font_size=30, hook_font_size=36)
+    h = Highlight(start=10, end=69, peak=11, score=5)
+    render_highlight(str(video), str(tmp_path / "p.mp4"), h, cfg, max_total=59)
+    assert h.start <= h.peak - 1 and h.end - h.start == 57  # 末尾側を削って 57 秒 + 先見せ 2 秒
+    assert h.video_duration == 59
+    assert abs(probe_duration(str(tmp_path / "p.mp4")) - 59) < 0.3
+
+
+def test_captions_overlapping_hook_keep_original_timing():
+    cfg = RenderConfig()
+    seg = TranscriptSegment(100.5, 106, "最初の言葉、次の言葉、最後の言葉")
+    ass = build_ass(cfg, 20, "", [seg], clip_start=100, hook_text="これ見て", lead_in=2.0)
+    subs = [l for l in ass.splitlines() if ",Sub," in l]
+    # 本来 2.5〜8 秒に文字量で割り振られる 2 枚 (「最初の言葉、」「次の言葉、最後の言葉」) のうち、
+    # フック文 (〜3 秒) に重なる 1 枚目の頭だけが削られ、2 枚目は本来のタイミングのまま
+    assert [l.split(",")[1:3] for l in subs] == [["0:00:03.00", "0:00:04.56"], ["0:00:04.56", "0:00:08.00"]]
+    assert subs[-1].endswith("次の言葉、最後の言葉")
+
+
+def test_long_words_are_split_and_spaces_kept():
+    caps = [c for _, _, c in split_captions("supercalifragilisticexpialidocious wow", 0, 5, 10)]
+    assert all(sum(1 if ord(ch) > 0x2E80 else 0.55 for ch in c) <= 10 for c in caps)
+    assert caps[-1].endswith(" wow") or caps[-1] == "wow"
+    assert "".join(caps).replace(" ", "") == "supercalifragilisticexpialidociouswow"
+
+
+def test_schedule_uses_previous_days_early_slot(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.publish.posts_per_day = 2
+    now = datetime(2026, 10, 7, 5, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+    [e] = add_to_schedule(cfg, [Highlight(start=0, end=30, peak=5, score=1, output_path="/x/a.mp4")], now=now)
+    assert e["publish_at"][:16] == "2026-10-07T07:00"
+
+
+def test_bad_publish_config_does_not_lose_results(make_stream, tmp_path, caplog):
+    from twitch_shorts.chat import load_chat
+    from twitch_shorts.pipeline import LocalSource, process
+
+    video, chat_path = make_stream(duration=100, events=(50,))
+    cfg = _cfg(tmp_path)
+    cfg.render.width, cfg.render.height = 360, 640
+    cfg.publish.timezone = "JST"  # 不正なタイムゾーン
+    r = process(cfg, LocalSource(str(video)), load_chat(chat_path), tmp_path / "out" / "run")
+    assert r.highlights and (tmp_path / "out" / "run" / "highlights.json").exists()
+    assert "投稿予定表に追加できませんでした" in caplog.text

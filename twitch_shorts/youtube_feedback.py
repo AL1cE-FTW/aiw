@@ -147,7 +147,8 @@ def load_youtube_csv(path: str | Path) -> tuple[list[ShortResult], list[str]]:
 # ---------------------------------------------------------------------------
 
 def _norm_title(t: str) -> str:
-    t = re.sub(r"#\S+", "", t)  # ハッシュタグ
+    # ハッシュタグ (#shorts 等) は消すが、「切り抜き #12」のような番号は区別に必要なので残す
+    t = re.sub(r"#(?!\d+(?:\s|$))\S+", "", t)
     t = re.sub(r"[\s　【】\[\]()（）「」『』!！?？・|｜]+", "", t)
     return t.lower()
 
@@ -165,7 +166,7 @@ def our_shorts(cfg: Config) -> list[dict]:
             if h.get("output_path") and h.get("title"):
                 items[h["output_path"]] = {"title": h["title"], "path": h["output_path"],
                                            "signals": h.get("signals", {}), "hook": h.get("hook", ""),
-                                           "duration": h.get("duration")}
+                                           "duration": h.get("video_duration") or h.get("duration")}
     sched = out / "schedule.json"
     if sched.exists():
         for e in json.loads(sched.read_text(encoding="utf-8")):
@@ -178,7 +179,19 @@ def match_shorts(results: list[ShortResult], ours: list[dict], threshold: float 
     pool = [(o, _norm_title(o["title"])) for o in ours]
     used: set[str] = set()
     n = 0
+    # 似たタイトルが多い場合に取り違えないよう、タイトルが完全に一致するものから先に確定させる
+    by_key: dict[str, list[dict]] = {}
+    for o, okey in pool:
+        by_key.setdefault(okey, []).append(o)
     for r in results:
+        cands = [o for o in by_key.get(_norm_title(r.title), []) if o["path"] not in used]
+        if cands:
+            _attach(r, cands[0])
+            used.add(cands[0]["path"])
+            n += 1
+    for r in results:
+        if r.matched_path:
+            continue
         key = _norm_title(r.title)
         if not key:
             continue
@@ -186,17 +199,26 @@ def match_shorts(results: list[ShortResult], ours: list[dict], threshold: float 
         for o, okey in pool:
             if o["path"] in used or not okey:
                 continue
-            ratio = 1.0 if (okey in key or key in okey) else difflib.SequenceMatcher(None, key, okey).ratio()
+            if okey == key:
+                ratio = 1.0
+            elif (okey in key or key in okey) and min(len(okey), len(key)) / max(len(okey), len(key)) >= 0.8:
+                ratio = 0.95  # 投稿時に少し書き足した程度
+            else:
+                ratio = difflib.SequenceMatcher(None, key, okey).ratio()
             if ratio > best_ratio:
                 best, best_ratio = o, ratio
         if best and best_ratio >= threshold:
             used.add(best["path"])
-            r.matched_path = best["path"]
-            r.signals = best.get("signals") or {}
-            r.hook = best.get("hook") or ""
-            r.our_duration = best.get("duration")
+            _attach(r, best)
             n += 1
     return n
+
+
+def _attach(r: ShortResult, o: dict) -> None:
+    r.matched_path = o["path"]
+    r.signals = o.get("signals") or {}
+    r.hook = o.get("hook") or ""
+    r.our_duration = o.get("duration")
 
 
 # ---------------------------------------------------------------------------
@@ -214,12 +236,12 @@ def analyze_feedback(cfg: Config, results: list[ShortResult], missing: list[str]
     if "stayed_pct" in missing:
         notes.append("CSV に「視聴を継続 (Stayed to watch / Viewed vs. swiped away)」の列がありません。"
                      "詳細モードで列を追加してからエクスポートするか、ショートの画面の数値を書き写した CSV を使ってください。")
+    stayed = _median(r.stayed_pct for r in results)
     benchmarks = {
         "shorts": len(results),
         "median_impressions": _median(r.impressions for r in results),
-        "median_stayed_pct": _median(r.stayed_pct for r in results),
-        "median_swipe_pct": (round(100 - _median(r.stayed_pct for r in results), 1)
-                             if _median(r.stayed_pct for r in results) is not None else None),
+        "median_stayed_pct": stayed,
+        "median_swipe_pct": round(100 - stayed, 1) if stayed is not None else None,
         "median_avg_viewed_pct": _median(r.avg_viewed_pct for r in results),
     }
 

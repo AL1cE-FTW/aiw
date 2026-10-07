@@ -33,6 +33,14 @@ def _char_width(ch: str) -> float:
     return 1.0 if unicodedata.east_asian_width(ch) in ("W", "F", "A") else 0.55
 
 
+# 句読点・感嘆符・空白の直後で区切る
+_PHRASE_RE = re.compile(r"[^、。！？!?…\s]*[、。！？!?…\s]*")
+
+
+def _width(text: str) -> float:
+    return sum(_char_width(c) for c in text)
+
+
 def wrap_text(text: str, max_width: float, max_lines: int = 3) -> list[str]:
     """全角を 1、半角を約 0.55 として幅を数え、単語をなるべく割らずに折り返す。"""
     text = " ".join(text.split())
@@ -50,8 +58,21 @@ def wrap_text(text: str, max_width: float, max_lines: int = 3) -> list[str]:
         tokens.append(ch)
     if word:
         tokens.append(word)
+    # 1 行に収まらない長い単語は文字単位で分ける
+    split_tokens: list[str] = []
     for tok in tokens:
-        w = sum(_char_width(c) for c in tok)
+        if _width(tok) <= max_width:
+            split_tokens.append(tok)
+            continue
+        piece = ""
+        for ch in tok:
+            if piece and _width(piece + ch) > max_width:
+                split_tokens.append(piece)
+                piece = ""
+            piece += ch
+        split_tokens.append(piece)
+    for tok in split_tokens:
+        w = _width(tok)
         if cur_w + w > max_width and cur.strip():
             lines.append(cur.strip())
             cur, cur_w = "", 0.0
@@ -80,14 +101,6 @@ def _ass_time(t: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-# 句読点・感嘆符・空白の直後で区切る
-_PHRASE_RE = re.compile(r"[^、。！？!?…\s]*[、。！？!?…\s]*")
-
-
-def _width(text: str) -> float:
-    return sum(_char_width(c) for c in text)
-
-
 def split_captions(text: str, start: float, end: float, max_chars: float) -> list[tuple[float, float, str]]:
     """長い発話を max_chars 以内のテロップに分け、文字量に応じて表示時間を割り振る。"""
     chunks: list[str] = []
@@ -105,6 +118,8 @@ def split_captions(text: str, start: float, end: float, max_chars: float) -> lis
         else:  # 区切りの無い長い句だけは文字数で切る
             *full, cur = wrap_text(phrase, max_chars, max_lines=1000)
             chunks.extend(full)
+            if phrase[-1:].isspace():
+                cur += " "  # 次の句と単語がくっつかないように
     if cur.strip():
         chunks.append(cur.strip())
     if not chunks:
@@ -156,16 +171,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         lines = wrap_text(hook_text, min(float(cfg.caption_max_chars), W * 0.92 / cfg.hook_font_size), max_lines=2)
         text = r"\N".join(_ass_escape(l) for l in lines)
         events.append(f"Dialogue: 2,{_ass_time(0)},{_ass_time(hook_end)},Hook,,0,0,0,,{pos}{text}")
+    # 先見せ部分とフック文の表示中は字幕を出さない (同じ位置に重なるため)
+    floor = max(lead_in, hook_end)
     for seg in segments:
         a = seg.start - clip_start + lead_in
         b = seg.end - clip_start + lead_in
-        # 先見せ部分とフック文の表示中は字幕を出さない (同じ位置に重なるため)
-        a = max(a, lead_in, hook_end)
-        b = min(b, duration)
-        if b - a < 0.3:
+        if b <= floor or a >= duration:
             continue
+        # 発話本来のタイミングで分けてから、隠れる部分を落とす (音声とずれないように)
         for ca, cb, chunk in split_captions(seg.text, a, b, cap_chars):
-            events.append(f"Dialogue: 0,{_ass_time(ca)},{_ass_time(cb)},Sub,,0,0,0,,{pos}{_ass_escape(chunk)}")
+            ca, cb = max(ca, floor), min(cb, duration)
+            if cb - ca >= 0.3:
+                events.append(f"Dialogue: 0,{_ass_time(ca)},{_ass_time(cb)},Sub,,0,0,0,,{pos}{_ass_escape(chunk)}")
     return header + "\n".join(events) + "\n"
 
 
@@ -294,6 +311,10 @@ def render_short(
     return out_path
 
 
+# 長さ調整で本編の頭を削るとき、盛り上がりのピークの何秒前までは残すか
+PEAK_KEEP_BEFORE = 3.0
+
+
 def hook_range(h: Highlight, cfg: RenderConfig) -> tuple[float, float] | None:
     """盛り上がりのピーク付近から、冒頭に先見せする区間を選ぶ。"""
     if cfg.hook_seconds <= 0:
@@ -308,13 +329,21 @@ def render_highlight(source: str, out_path: str, h: Highlight, cfg: RenderConfig
                      max_total: float | None = None) -> str:
     """ハイライトを書き出す。``source_offset`` はソースファイル先頭が VOD 上の何秒目か。
 
-    先見せを付けて ``max_total`` 秒を超える場合は、本編の頭 (前フリ) を削って収める。
+    先見せを付けて ``max_total`` 秒を超える場合は本編を短くする。基本は頭 (前フリ) を削るが、
+    盛り上がりのピークの少し前までしか削らず、それでも長い分は末尾を削る。
+    書き出した動画に合わせて ``h.start`` / ``h.end`` / ``h.video_duration`` を更新する。
     """
     hook = hook_range(h, cfg)
-    start = h.start
-    if hook and max_total and (hook[1] - hook[0]) + (h.end - start) > max_total:
-        start = h.end - (max_total - (hook[1] - hook[0]))
+    lead_in = (hook[1] - hook[0]) if hook else 0.0
+    start, end = h.start, h.end
+    if max_total and lead_in + (end - start) > max_total:
+        main_len = max_total - lead_in
+        start = max(h.start, min(h.end - main_len, h.peak - PEAK_KEEP_BEFORE))
+        end = start + main_len
     seg = [TranscriptSegment(s.start - source_offset, s.end - source_offset, s.text) for s in segments or []]
     shifted_hook = (hook[0] - source_offset, hook[1] - source_offset) if hook else None
-    return render_short(source, out_path, start - source_offset, h.end - source_offset, cfg, h.title, seg,
-                        hook=shifted_hook, hook_text=h.hook)
+    out = render_short(source, out_path, start - source_offset, end - source_offset, cfg, h.title, seg,
+                       hook=shifted_hook, hook_text=h.hook)
+    h.start, h.end = round(start, 2), round(end, 2)
+    h.video_duration = round(lead_in + (end - start), 2)
+    return out
