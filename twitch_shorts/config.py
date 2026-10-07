@@ -95,7 +95,17 @@ class RenderConfig:
     font: str = "Noto Sans CJK JP"
     fonts_dir: str = ""
     title_font_size: int = 72
-    subtitle_font_size: int = 60
+    subtitle_font_size: int = 80
+    hook_font_size: int = 96
+    # --- ショートの型 (参考: タルレミ・エラ「OW動画投稿講座」) ---
+    # 最初の 3 秒でスワイプを止めるため、冒頭に盛り上がりの瞬間を先見せする秒数 (0 で無効)
+    hook_seconds: float = 2.0
+    # フック文 (LLM が付けた「引きの言葉」) を表示する秒数
+    hook_text_seconds: float = 3.0
+    # テロップ (字幕・フック文) の位置。画面上端からの割合。全動画で固定して「見慣れた配置」にする
+    caption_position: float = 0.38
+    # テロップ 1 枚の最大文字数。超える分は次のテロップに分けて順番に表示する
+    caption_max_chars: int = 10
     title_template: str = "{channel} 切り抜き #{index}"
     crf: int = 20
     preset: str = "veryfast"
@@ -135,6 +145,16 @@ class WatchConfig:
 
 
 @dataclass
+class PublishConfig:
+    """投稿予定表 (参考: タルレミ・エラ「OW動画投稿講座」— 毎日同じ時間に投稿、解説系以外は 1 日 1 本まで)。"""
+
+    enabled: bool = True
+    post_time: str = "19:00"
+    posts_per_day: int = 1
+    timezone: str = "Asia/Tokyo"
+
+
+@dataclass
 class Config:
     output_dir: str = "output"
     work_dir: str = "work"
@@ -144,6 +164,7 @@ class Config:
     transcribe: TranscribeConfig = field(default_factory=TranscribeConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
+    publish: PublishConfig = field(default_factory=PublishConfig)
 
 
 def _apply(obj, data: dict, path: str = "") -> None:

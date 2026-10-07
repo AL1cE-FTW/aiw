@@ -178,10 +178,19 @@ def process(
         video, offset = source.video_for(h.start, h.end)
         out = run_dir / f"short_{i:02d}_{_hms(h.start)}.mp4"
         log.info("書き出し中: %s (%s〜%s) %s", out.name, _hms(h.start, ":"), _hms(h.end, ":"), h.title)
-        render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset)
+        render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
+                         max_total=cfg.detect.max_duration)
         h.output_path = str(out)
 
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
+    if cfg.publish.enabled and not dry_run:
+        from .schedule import add_to_schedule
+
+        try:
+            for e in add_to_schedule(cfg, selected, channel):
+                log.info("投稿予定: %s  %s", e["publish_at"][:16].replace("T", " "), e["title"])
+        except (ValueError, KeyError, OSError) as e:  # 設定ミスで書き出し済みの結果を失わないように
+            log.warning("投稿予定表に追加できませんでした ([publish] の設定を確認してください): %s", e)
     return RunResult(selected, run_dir, score)
 
 

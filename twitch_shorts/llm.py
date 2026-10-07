@@ -25,11 +25,12 @@ RESULT_SCHEMA = {
                     "id": {"type": "integer"},
                     "score": {"type": "number", "description": "0〜10。ショート動画としての面白さ"},
                     "title": {"type": "string"},
+                    "hook": {"type": "string", "description": "冒頭 3 秒に出す引きの言葉 (10 文字以内)"},
                     "reason": {"type": "string"},
                     "start": {"type": "number"},
                     "end": {"type": "number"},
                 },
-                "required": ["id", "score", "title", "reason", "start", "end"],
+                "required": ["id", "score", "title", "hook", "reason", "start", "end"],
                 "additionalProperties": False,
             },
         }
@@ -46,6 +47,9 @@ SYSTEM_PROMPT = """あなたは Twitch 配信の切り抜き編集者です。
 - score: 0〜10。単発で見て状況が分かり、オチ・驚き・笑い・スーパープレイがあるものを高く。
   雑談の途中やチャットの挨拶ラッシュなど、文脈なしでは面白くない場面は低く。
 - title: {language}で 25 文字以内。釣りすぎず、内容が伝わる切り抜きタイトル。
+- hook: 動画の最初の 3 秒に大きく表示する「引きの言葉」。{language}で 10 文字以内。
+  ショートは最初の 3 秒でスワイプされるかが決まるため、続きを見たくなる言葉にする
+  (例: 「まさかの結末」「これ見て」「1v3の結果…」)。オチそのものは言わない。
 - reason: 評価理由を 1 文で。
 - start / end: 候補区間 (秒) の範囲内で、より良い切り出し位置があれば調整した値。
   長さは {min_dur:.0f}〜{max_dur:.0f} 秒に収めること。調整不要なら元の値をそのまま返す。
@@ -124,6 +128,7 @@ def rerank_with_claude(
             ranked.append((h.score / max_signal * 0.5, h))
             continue
         h.title = str(r.get("title") or "").strip()
+        h.hook = str(r.get("hook") or "").strip()
         h.reason = str(r.get("reason") or "").strip()
         start, end = float(r.get("start", h.start)), float(r.get("end", h.end))
         # LLM の提案は元の候補区間の内側かつ長さ制約を満たす場合だけ採用する

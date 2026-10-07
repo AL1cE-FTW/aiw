@@ -63,10 +63,12 @@ class Highlight:
     score: float
     signals: dict[str, float] = field(default_factory=dict)
     title: str = ""
+    hook: str = ""  # 冒頭に出す「引きの言葉」
     reason: str = ""
     chat_sample: list[str] = field(default_factory=list)
     transcript: str = ""
     output_path: str = ""
+    video_duration: float = 0.0  # 書き出した動画の実際の長さ (先見せを含む)
 
     @property
     def duration(self) -> float:
