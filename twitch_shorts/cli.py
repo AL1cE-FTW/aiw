@@ -7,6 +7,7 @@
   twitch-shorts chat <VODのURL/ID>       VOD のチャットを JSONL で保存する
   twitch-shorts analyze <チャンネル>      人気クリップを分析し、レポートと推奨設定を作る
   twitch-shorts schedule                作ったショートの投稿予定 (毎日決まった時刻に 1 本) を表示
+  twitch-shorts feedback <CSV>          YouTube Studio の数値を取り込み、結果から検出設定を調整する
 """
 
 from __future__ import annotations
@@ -188,6 +189,30 @@ def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_feedback(cfg: Config, args: argparse.Namespace) -> int:
+    from datetime import datetime
+
+    from .youtube_feedback import analyze_feedback, load_youtube_csv, match_shorts, our_shorts, write_outputs
+
+    results, missing = load_youtube_csv(args.csv)
+    matched = match_shorts(results, our_shorts(cfg))
+    fb = analyze_feedback(cfg, results, missing)
+    out = Path(args.report_dir or Path(cfg.output_dir) / f"feedback_{datetime.now():%Y%m%d}")
+    paths = write_outputs(fb, out)
+    b = fb.benchmarks
+    print(f"ショート {len(results)} 本を読み込みました (作ったショートと一致: {matched} 本)")
+    if b["median_stayed_pct"] is not None:
+        print(f"  視聴を継続 (中央値): {b['median_stayed_pct']}%  / スワイプ率: {b['median_swipe_pct']}%")
+    if b["median_avg_viewed_pct"] is not None:
+        print(f"  平均視聴率 (中央値): {b['median_avg_viewed_pct']}%")
+    for n in fb.notes:
+        print(f"  ※ {n}")
+    print(f"レポート: {paths['report']}")
+    if fb.recommended:
+        print(f"推奨設定: {paths['config']}  (使い方: twitch-shorts -c config.toml -c {paths['config']} ...)")
+    return 0
+
+
 def cmd_chat(cfg: Config, args: argparse.Namespace) -> int:
     from .chat import fetch_vod_chat, save_chat_jsonl
     from .twitch_api import parse_video_id
@@ -265,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--all", action="store_true", help="過ぎた予定も表示")
     sp.add_argument("-o", "--output", help="出力ディレクトリ")
     sp.set_defaults(func=cmd_schedule)
+
+    sp = sub.add_parser("feedback", help="YouTube Studio の数値を取り込んで検出設定を調整する")
+    sp.add_argument("csv", help="YouTube Studio 詳細モードのエクスポート (Table data.csv) か手入力の CSV")
+    # -o/--output は他コマンドでは output_dir の上書きなので、ここではレポート先として別名にする
+    sp.add_argument("-o", "--report-dir", dest="report_dir", help="レポートの出力先")
+    sp.set_defaults(func=cmd_feedback)
 
     sp = sub.add_parser("chat", help="VOD のチャットを保存する")
     sp.add_argument("vod")

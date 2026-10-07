@@ -1,5 +1,6 @@
 # 毎日、チャンネルの人気クリップを分析して検出設定を調整し、その設定で最新アーカイブから
 # ショート動画を作って、動画と分析レポートを Artifacts にアップロードする。
+# feedback/youtube.csv (YouTube Studio のエクスポート) をコミットしておくと、その結果も設定に反映する。
 # 使うには: リポジトリの Settings → Secrets and variables → Actions で
 #   Secrets:   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET (任意: ANTHROPIC_API_KEY)
 #   Variables: TWITCH_CHANNEL (省略時 yuuki_ftw)
@@ -54,6 +55,13 @@ jobs:
             output/schedule.json
           key: work-${{ github.run_id }}
           restore-keys: work-
+      - name: Apply YouTube results
+        if: steps.check.outputs.skip != 'true' && hashFiles('feedback/youtube.csv') != ''
+        run: |
+          # 投稿したショートの結果 (YouTube Studio のエクスポート) を検出設定に反映する
+          if twitch-shorts feedback feedback/youtube.csv -o output/feedback; then
+            echo "FEEDBACK=-c output/feedback/config.feedback.toml" >> "$GITHUB_ENV"
+          fi
       - name: Analyze popular clips
         if: steps.check.outputs.skip != 'true'
         run: |
@@ -69,9 +77,9 @@ jobs:
           LLM_FLAG=""
           if [ -n "$ANTHROPIC_API_KEY" ]; then LLM_FLAG="--llm"; fi
           if [ -n "$VOD" ]; then
-            twitch-shorts $TUNED vod "$VOD" $LLM_FLAG
+            twitch-shorts $TUNED $FEEDBACK vod "$VOD" $LLM_FLAG
           else
-            twitch-shorts $TUNED latest "$CHANNEL" --count 1 $LLM_FLAG
+            twitch-shorts $TUNED $FEEDBACK latest "$CHANNEL" --count 1 $LLM_FLAG
           fi
       - name: Drop large downloads before caching
         if: always() && steps.check.outputs.skip != 'true'

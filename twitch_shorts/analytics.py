@@ -381,22 +381,22 @@ def _toml_key(k: str) -> str:
     return json.dumps(k, ensure_ascii=False)
 
 
-def tuned_config_toml(result: AnalysisResult) -> str:
-    rec = result.recommended
-    lines = [
-        f"# {result.channel} のクリップ分析 ({result.generated_at}) から作った推奨設定",
-        "# 使い方: twitch-shorts -c config.tuned.toml ...  (または config.toml にマージ)",
-        "",
-        "[detect]",
-    ]
+def overrides_toml(header: str, rec: dict, current: dict) -> str:
+    """推奨値 (detect セクションの上書き) を、そのまま -c で重ねられる TOML にする。"""
+    lines = [f"# {header}", "# 使い方: twitch-shorts -c config.toml -c <このファイル> ...", "", "[detect]"]
     for k, v in rec.items():
         if k != "keywords":
-            cur = result.current.get(k)
+            cur = current.get(k)
             lines.append(f"{k} = {v}" + (f"  # 現在: {cur}" if cur is not None else ""))
     if rec.get("keywords"):
         lines += ["", "[detect.keywords]"]
         lines += [f"{_toml_key(k)} = {v}" for k, v in rec["keywords"].items()]
     return "\n".join(lines) + "\n"
+
+
+def tuned_config_toml(result: AnalysisResult) -> str:
+    return overrides_toml(f"{result.channel} のクリップ分析 ({result.generated_at}) から作った推奨設定",
+                          result.recommended, result.current)
 
 
 SIGNAL_NAMES = {"chat": "チャット流速", "keywords": "盛り上がりワード", "audio": "音量",

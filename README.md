@@ -30,6 +30,7 @@ Twitch の配信から**盛り上がった場面を自動で見つけて**、You
 | `twitch-shorts chat <URL or ID>` | VOD のチャットを JSONL で保存するだけ |
 | `twitch-shorts analyze yuuki_ftw` | **よく見られたクリップを分析**し、レポートと推奨設定 (`config.tuned.toml`) を作る |
 | `twitch-shorts schedule` | 作ったショートの**投稿予定** (毎日同じ時刻に 1 本) を表示 |
+| `twitch-shorts feedback "Table data.csv"` | **YouTube の結果** (インプレッション・スワイプ率・維持率) を取り込み、検出設定を調整 |
 
 共通オプション: `-n 本数` / `--layout blur|crop|facecam` / `--transcribe` (字幕) / `--llm` (AI 評価・タイトル) / `--dry-run` (検出のみ)
 
@@ -106,13 +107,38 @@ Settings → Secrets and variables → Actions で以下を設定すると有効
 | 配置は決めたら絶対に変えない (見慣れた配置が最強のスワイプ防止) | タイトル・テロップの位置とレイアウトは設定で固定し、全動画で同じにする | `layout`, `caption_position` |
 | テロップは真ん中から少し上に固定、10 文字以上なら途中でカット | 字幕・フック文を画面の上から 38% の位置に固定。10 文字を超える発話は句読点で区切って次のテロップに分けて順番に表示 | `caption_position`, `caption_max_chars` |
 | 毎日同じ時間に投稿、解説系以外は 1 日 1 本まで | 作ったショートを良い順に**毎日 19:00 の枠へ 1 本ずつ**割り当てた投稿予定表 (`output/schedule.csv`) を作る | `post_time`, `posts_per_day` |
-| 見るべき指標はインプレッション・スワイプ率・維持率 | 下の「分析」で Twitch 側の実績を使って検出を調整 (YouTube 側の数値の取り込みは今後の拡張候補) | — |
+| 見るべき指標はインプレッション・スワイプ率・維持率 | `feedback` コマンドで YouTube Studio の数値を取り込み、スワイプされにくかったショートの傾向に検出設定を寄せる (下記) | — |
 
 ```bash
 twitch-shorts schedule        # これからの投稿予定を表示
 ```
 
 ※ 字幕は `--transcribe`、引きの言葉は `--llm` を付けたときに入ります (付けない場合も先見せは入ります)。
+
+## YouTube の結果で改善する (feedback)
+
+投稿したショートの **インプレッション・スワイプ率 (視聴を継続)・維持率 (平均視聴率)** を取り込み、
+次の切り抜きに反映します。
+
+1. YouTube Studio → アナリティクス → **詳細モード** を開き、対象期間を選ぶ
+2. 列に「インプレッション数」「平均視聴率」「視聴を継続」(英語 UI では Impressions / Average percentage viewed /
+   Stayed to watch・Viewed vs. swiped away) を追加して、**現在のビューをエクスポート** → `Table data.csv`
+3. 取り込む
+
+```bash
+twitch-shorts feedback "Table data.csv"
+# → output/feedback_YYYYMMDD/report.md, feedback.json, config.feedback.toml
+twitch-shorts -c config.toml -c output/feedback_YYYYMMDD/config.feedback.toml latest yuuki_ftw
+```
+
+- 列名は英語/日本語の表記ゆれを吸収します。エクスポートに「視聴を継続」が入らない場合は、ショートの画面の数値を
+  書き写した CSV (`title,impressions,stayed_pct,avg_viewed_pct`) でも動きます。
+- このツールで作ったショートとは**タイトル**で突き合わせます (投稿時に付けた `#shorts` などのハッシュタグは無視)。
+- レポートには、チャンネルの中央値を基準にした各ショートの診断 (冒頭でスワイプされがち / 途中で離脱されがち /
+  表示回数が少ない)、スワイプされにくかったショートで強かったシグナル、長さと維持率の関係、引きの言葉の有無による差が出ます。
+- 突き合わせできたショートが 4 本以上あれば、シグナルの重み (1 点差ごとに 10%、±30% まで) と最大の長さを調整した
+  推奨設定を出します。外部の目安 (維持率 60% など) ではなく、自分のチャンネルの中央値と比べます。
+- GitHub Actions では、リポジトリに `feedback/youtube.csv` を置いておくと毎日の処理で自動的に反映されます。
 
 ## 分析して「みんなが見てくれる」ショートに寄せる
 
@@ -204,3 +230,7 @@ Twitch への通信部分はモックでテストしています。
 - ショートの型 (冒頭 3 秒・配置固定・テロップ位置と文字数・投稿頻度・見るべき指標): タルレミ・エラ
   「OW動画投稿講座」 <https://note.com/tallemi_ella/n/na6e518039897>
   (開発環境から本文に直接アクセスできなかったため、検索エンジン経由で確認できた要点に基づいています)
+- YouTube ショートの指標 (視聴を継続・平均視聴率) と詳細モードのエクスポート: YouTube ヘルプ
+  <https://support.google.com/youtubecreatorstudio/answer/12220281?hl=ja>,
+  <https://support.google.com/youtube/answer/9717005?hl=ja>
+  (エクスポート CSV の正確な列名は公式に記載が無いため、表記ゆれを吸収する実装にしています)

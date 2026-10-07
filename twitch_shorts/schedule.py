@@ -71,6 +71,7 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
             "score": h.score,
             "duration": round(h.duration, 1),
             "path": h.output_path,
+            "signals": h.signals,  # YouTube の結果と突き合わせて検出を調整するため (feedback コマンド)
         }
         entries.append(entry)
         added.append(entry)
@@ -80,7 +81,8 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:  # Excel でも文字化けしないよう BOM 付き
-        w = csv.DictWriter(f, fieldnames=["publish_at", "title", "hook", "channel", "score", "duration", "path"])
+        w = csv.DictWriter(f, fieldnames=["publish_at", "title", "hook", "channel", "score", "duration", "path"],
+                           extrasaction="ignore")
         w.writeheader()
         w.writerows(entries)
     return added
