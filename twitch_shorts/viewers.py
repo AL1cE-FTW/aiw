@@ -30,8 +30,18 @@ def load_viewers(path: str | Path) -> list[ViewerSample]:
             data = json.loads(raw)
             items = data if isinstance(data, list) else [data]
         except json.JSONDecodeError:
-            items = [json.loads(line) for line in raw.splitlines() if line.strip()]
-        samples = [ViewerSample(float(d["offset"]), int(d["viewers"])) for d in items]
+            items = []
+            for line in raw.splitlines():
+                try:
+                    items.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # 記録中の停電などで壊れた行は飛ばす
+        samples = []
+        for d in items:
+            try:
+                samples.append(ViewerSample(float(d["offset"]), int(d["viewers"])))
+            except (KeyError, TypeError, ValueError):
+                continue
     return sorted(samples, key=lambda v: v.offset)
 
 

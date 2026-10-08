@@ -55,8 +55,12 @@ def file_lock(path: str | Path, timeout: float = 120.0, stale: float = 600.0):
             except OSError:
                 continue  # ちょうど消えた
             if too_old:
+                # 古いロックは名前を変えてから消す (rename は 1 つのプロセスしか成功しないので、
+                # 複数のプロセスが同時に「古い」と判断しても、新しく作られたロックを消してしまわない)
+                grave = lock.with_name(f"{lock.name}.stale.{os.getpid()}.{time.monotonic_ns()}")
                 try:
-                    lock.unlink()
+                    os.rename(lock, grave)
+                    os.unlink(grave)
                 except OSError:
                     pass
                 continue

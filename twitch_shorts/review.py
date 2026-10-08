@@ -33,7 +33,7 @@ def write_review_page(run_dir: Path, highlights: list[Highlight], score: np.ndar
         video = ""
         if h.output_path:
             p = Path(h.output_path)
-            video = p.name if p.parent.resolve() == run_dir.resolve() else p.as_uri() if p.is_absolute() else str(p)
+            video = p.name if p.parent.resolve() == run_dir.resolve() else p.resolve().as_uri()
         items.append({
             "title": h.title, "hook": h.hook, "category": h.category or "未分類", "score": h.score,
             "start": h.start, "end": h.end, "peak": h.peak, "signals": h.signals, "reason": h.reason,

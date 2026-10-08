@@ -11,6 +11,11 @@ from twitch_shorts.twitch_api import VideoInfo
 from twitch_shorts.twitch_auth import TwitchAuthError, UserToken, device_login, load_token, save_token
 from twitch_shorts.twitch_clips import ClipCreator, ClipError, clip_window, create_clips
 
+
+def _vod2(*a, **k):
+    info = watcher.find_stream_vod_info(*a, **k)
+    return info[:2] if info else None
+
 from .conftest import FakeResponse, FakeSession
 
 
@@ -127,9 +132,9 @@ def test_find_stream_vod_uses_recording_offset():
             return [VideoInfo("cur", "42", "yuuki_ftw", "Y", "t", started, 600, "u")]
 
     rec_start = started.timestamp() + 95
-    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", rec_start) == ("cur", 95)
+    assert _vod2(FakeHelix(), "yuuki_ftw", rec_start) == ("cur", 95)
     # 録画開始より後に始まった VOD (別の配信) は使わない
-    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", started.timestamp() - 3600) is None
+    assert _vod2(FakeHelix(), "yuuki_ftw", started.timestamp() - 3600) is None
 
 
 def test_pipeline_creates_clips_when_enabled(make_stream, tmp_path, monkeypatch):
@@ -203,10 +208,10 @@ def test_find_stream_vod_rejects_previous_stream():
             return [VideoInfo("old", "42", "yuuki_ftw", "Y", "t", yesterday, 3 * 3600, "u")]
 
     today = yesterday.timestamp() + 86400
-    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", today) is None
+    assert _vod2(FakeHelix(), "yuuki_ftw", today) is None
     # 配信の開始時刻が分かれば、それと一致する VOD だけを使う
-    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", today, stream_started=today - 60) is None
-    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", yesterday.timestamp() + 30,
+    assert _vod2(FakeHelix(), "yuuki_ftw", today, stream_started=today - 60) is None
+    assert _vod2(FakeHelix(), "yuuki_ftw", yesterday.timestamp() + 30,
                                    stream_started=yesterday.timestamp()) == ("old", 30)
 
 
@@ -374,7 +379,7 @@ def test_find_stream_vod_back_to_back_streams():
             return [VideoInfo("prev", "42", "yuuki_ftw", "Y", "t", prev_start, 3600, "u")]
 
     # 前の配信が終わった 5 分後に録画開始 (開始時刻は不明) → 前の VOD は選ばない
-    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", prev_start.timestamp() + 3600 + 300,
+    assert _vod2(FakeHelix(), "yuuki_ftw", prev_start.timestamp() + 3600 + 300,
                                    user_id="42") is None
 
 
@@ -830,7 +835,7 @@ def test_leftover_gives_up_after_two_attempts(tmp_path, monkeypatch):
 
 def test_final_pass_falls_back_to_recording_when_vod_fails(make_stream, tmp_path, monkeypatch):
     cfg, session = _session(tmp_path, make_stream)
-    monkeypatch.setattr(watcher, "find_stream_vod", lambda *a, **k: ("v1", 10.0))
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 10.0, 1e6))
     monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: None)  # VOD のダウンロードに失敗
     out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session,
                               tmp_path / "out" / "yuuki_ftw" / session.name, False)
@@ -974,7 +979,7 @@ def test_recorder_restarts_in_same_session_while_still_live(tmp_path, monkeypatc
         def stop(self):
             pass
 
-    lives = iter([True, True, True, False])  # 1 回目の終了時は配信中 (3 回確認)、2 回目は終了
+    lives = iter([True, False])  # 1 回目の終了時は配信中、2 回目は終了
 
     class Helix:
         def get_stream(self, login):
@@ -1001,7 +1006,7 @@ def test_vod_fetch_failure_falls_back_to_recording(make_stream, tmp_path, monkey
     cfg, session = _session(tmp_path, make_stream)
     monkeypatch.setattr(download, "download_audio", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(download, "download_section", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
-    monkeypatch.setattr(watcher, "find_stream_vod", lambda *a, **k: ("v1", 0.0))
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 1e6))
     out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session,
                               tmp_path / "out" / "yuuki_ftw" / session.name, False)
     assert out and all(h.output_path.endswith(".mp4") for h in out)
@@ -1087,6 +1092,7 @@ def test_recorder_gives_up_after_quick_failures_and_waits_for_end(tmp_path, monk
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
     monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
     monkeypatch.setattr(watcher, "_wait_until_offline", lambda *a: waited.append(1))
+    monkeypatch.setattr(watcher, "_sleep_checking_stop", lambda s: None)
     monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
     watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
                                helix=object())
@@ -1108,3 +1114,104 @@ def test_file_lock_is_not_stolen_while_held(tmp_path):
 def test_auto_has_no_twitch_clips_flag():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["auto", "ch", "--twitch-clips"])
+
+
+
+# --- 10 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_truncated_chat_and_viewer_lines_are_skipped(tmp_path):
+    from twitch_shorts.chat import load_chat
+    from twitch_shorts.viewers import load_viewers
+
+    c = tmp_path / "chat.jsonl"
+    c.write_text('{"offset": 1, "user": "a", "text": "x"}\n{"offset": 2, "us', encoding="utf-8")
+    assert [m.offset for m in load_chat(c)] == [1]
+    v = tmp_path / "viewers.jsonl"
+    v.write_text('{"offset": 1, "viewers": 3}\n{"offset": 2, "vie', encoding="utf-8")
+    assert [x.viewers for x in load_viewers(v)] == [3]
+
+
+def test_recording_pass_with_no_rendered_short_counts_as_failure(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import pipeline
+
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(pipeline, "render_highlight", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    out = watcher._final_pass(cfg, "yuuki_ftw", None, 0.0, None, session,
+                              tmp_path / "out" / "yuuki_ftw" / session.name, False)
+    assert out == [] and not (session / "processed").exists()
+
+
+def test_dry_run_sessions_are_not_processed_later(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    watcher._final_pass(cfg, "yuuki_ftw", None, 0.0, None, session,
+                        tmp_path / "out" / "yuuki_ftw" / session.name, True)
+    assert (session / "dry_run").exists()
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: pytest.fail("dry-run の録画を処理した"))
+    watcher.process_leftovers(cfg, "yuuki_ftw")
+
+
+def test_restart_failure_still_runs_final_pass(tmp_path, monkeypatch):
+    class Proc:
+        returncode = 0
+        stderr = None
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    calls = []
+
+    def rec(c, out, r, q):
+        calls.append(out.name)
+        if len(calls) > 1:
+            raise FileNotFoundError("streamlink")
+        out.write_bytes(b"data")
+        return Proc()
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            self.out_path.write_text("", encoding="utf-8")
+
+        def stop(self):
+            pass
+
+    finals = []
+    monkeypatch.setattr(watcher, "start_live_recording", rec)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
+    monkeypatch.setattr(watcher, "_sleep_checking_stop", lambda s: None)
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: finals.append(1) or [])
+    watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
+                               helix=object())
+    assert finals == [1]
+
+
+def test_vod_pass_uses_known_vod_duration(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import download
+
+    cfg, session = _session(tmp_path, make_stream)
+    seen = {}
+    monkeypatch.setattr(download, "download_audio", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(watcher, "process", lambda *a, **k: seen.update(k) or (_ for _ in ()).throw(RuntimeError()))
+    watcher._run_from_vod(cfg, "yuuki_ftw", ("v1", 0.0, 7200.0), session, tmp_path / "o", True)
+    assert seen["duration"] == 7200.0
+
+
+def test_stale_lock_is_taken_over(tmp_path):
+    import os
+
+    from twitch_shorts.fileutil import file_lock
+
+    target = tmp_path / "x.json"
+    lock = tmp_path / "x.json.lock"
+    lock.write_text("123")
+    old = lock.stat().st_mtime - 3600
+    os.utime(lock, (old, old))
+    with file_lock(target, timeout=1):
+        assert lock.exists()
+    assert not lock.exists() and not list(tmp_path.glob("*.stale.*"))
