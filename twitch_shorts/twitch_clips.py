@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from pathlib import Path
 
@@ -37,12 +38,14 @@ class ClipCreator:
         self.session = session or requests.Session()
 
     def from_vod(self, vod_id: str, end_offset: float, duration: float, title: str = "") -> dict:
+        duration = round(min(MAX_CLIP, max(MIN_CLIP, duration)), 1)
         params = {
             "broadcaster_id": self.token.user_id,
             "editor_id": self.token.user_id,
             "vod_id": vod_id,
-            "vod_offset": int(round(end_offset)),
-            "duration": round(min(MAX_CLIP, max(MIN_CLIP, duration)), 1),
+            # vod_offset は整数で、duration 以上である必要がある
+            "vod_offset": max(math.ceil(end_offset), math.ceil(duration)),
+            "duration": duration,
         }
         if title:
             params["title"] = title[:100]
@@ -59,7 +62,7 @@ class ClipCreator:
                 self.token.access_token(force_refresh=True)
                 refreshed = True
                 continue
-            if r.status_code == 400 and "title" in params and not retried_title:
+            if r.status_code == 400 and "title" in params and not retried_title and "title" in r.text.lower():
                 # オープンベータのため title を受け付けない場合に備え、無しで再試行する
                 params.pop("title")
                 retried_title = True

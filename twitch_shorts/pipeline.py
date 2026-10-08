@@ -95,7 +95,7 @@ def fill_template(template: str, values: dict) -> str:
     """{channel} などを埋める。知らない変数や {} の書き間違いがあってもエラーにしない。"""
     try:
         return template.format_map(_KeepUnknown(values)).strip()
-    except (ValueError, IndexError, AttributeError):
+    except (ValueError, IndexError, AttributeError, TypeError, KeyError):
         log.warning("テンプレートを解釈できないため、そのまま使います: %s", template)
         return template.strip()
 
@@ -202,8 +202,14 @@ def process(
                          max_total=cfg.detect.max_duration)
         h.output_path = str(out)
 
-    if cfg.clips.enabled and clip_vod and selected and not dry_run:
-        _make_twitch_clips(cfg, selected, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
+    if clip_vod:
+        # 前回までの逐次処理で VOD が見つかっていなかった分にも、リンクとクリップを付ける
+        for e in exclude:
+            if not e.vod_url:
+                e.vod_url = vod_timestamp_url(clip_vod[0], e.start + clip_vod[1])
+    pending = selected + [e for e in exclude if e.output_path and not e.twitch_clip]
+    if cfg.clips.enabled and clip_vod and pending and not dry_run:
+        _make_twitch_clips(cfg, pending, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
                            channel=channel)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
     try:

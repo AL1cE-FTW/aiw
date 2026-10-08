@@ -34,3 +34,13 @@ def test_post_text_defaults_and_vod_url():
     assert h.hashtags == ["#APEX", "#Shorts", "#Twitch切り抜き"]  # 大文字小文字違いの重複は足さない
     assert "yuuki_ftw" in h.description
     assert vod_timestamp_url("123", 3725.9) == "https://www.twitch.tv/videos/123?t=1h2m5s"
+
+
+
+def test_review_page_survives_html_comment_and_tiny_series(tmp_path):
+    hs = [Highlight(start=0, end=1, peak=0, score=1, title="t", chat_sample=["<!--<script>", "a & b"])]
+    page = write_review_page(tmp_path, hs, np.array([1.0]), 1.0, "y", "").read_text("utf-8")
+    body = page.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+    assert "<" not in body and ">" not in body and "&" not in body
+    assert json.loads(body)["items"][0]["chat"] == ["<!--<script>", "a & b"]
+    assert "pts.length < 2" in page

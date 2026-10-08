@@ -18,6 +18,8 @@ log = logging.getLogger(__name__)
 
 # 録画中ファイルの末尾付近は書き込み途中なので、この秒数ぶん手前までを処理対象にする
 LIVE_TAIL_MARGIN = 45.0
+# 配信の VOD が見つからなかったときに探し直す間隔 (秒)
+VOD_RETRY_SECONDS = 600
 
 
 class LiveChecker:
@@ -48,10 +50,11 @@ def wait_until_live(cfg: Config, channel: str, checker: LiveChecker | None = Non
         time.sleep(cfg.watch.poll_interval)
 
 
-def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]:
+def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = False) -> list[Highlight]:
     """1 回分の配信を録画し、ショート動画を作る。配信が終わったら戻る。
 
     ``helix`` (HelixClient) があれば同時視聴者数も記録し、検出のシグナルに使う。
+    ``dry_run`` なら検出だけ行い、動画の書き出しと Twitch クリップの作成はしない。
     """
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = Path(cfg.work_dir) / channel / stamp
@@ -74,24 +77,36 @@ def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]
         log.info("Twitch API の認証情報が無いため、同時視聴者数は記録しません")
     log.info("録画中: %s / チャット: %s", video_path, chat_path)
 
-    vod_cache: dict[str, tuple[str, float]] = {}
+    vod_state: dict = {"vod": None, "user_id": None, "next_try": 0.0, "warned": False,
+                       "started": stream_started}
 
     def clip_vod() -> tuple[str, float] | None:
-        """この配信の VOD を探す (クリップ作成と、場面へのリンク用)。見つかるまで毎回探し直す。"""
-        if helix is None:
+        """この配信の VOD を探す (クリップ作成と、場面へのリンク用)。
+
+        見つかるまでは 10 分おきに探し直し、見つからない旨の警告は 1 回だけ出す。
+        """
+        if helix is None or vod_state["vod"] is not None:
+            return vod_state["vod"]
+        if time.time() < vod_state["next_try"]:
             return None
-        if "vod" not in vod_cache:
-            try:
-                found = find_stream_vod(helix, channel, start_time, stream_started)
-            except Exception as e:
-                log.warning("この配信の VOD を確認できませんでした: %s", e)
-                return None
-            if not found:
+        vod_state["next_try"] = time.time() + VOD_RETRY_SECONDS
+        try:
+            if vod_state["started"] is None:
+                vod_state["started"] = _stream_started_at(helix, channel)
+            if vod_state["user_id"] is None:
+                vod_state["user_id"] = helix.get_user_id(channel)
+            found = find_stream_vod(helix, channel, start_time, vod_state["started"], vod_state["user_id"])
+        except Exception as e:
+            log.warning("この配信の VOD を確認できませんでした: %s", e)
+            return None
+        if not found:
+            if not vod_state["warned"]:
                 log.warning("この配信の VOD が見つかりません。Twitch クリップと VOD へのリンクは付きません "
                             "(Twitch の設定で「過去の配信を保存」が有効か確認してください)")
-                return None
-            vod_cache["vod"] = found
-        return vod_cache["vod"]
+                vod_state["warned"] = True
+            return None
+        vod_state["vod"] = found
+        return found
 
     done: list[Highlight] = []
     next_run = start_time + cfg.watch.rolling_minutes * 60
@@ -102,7 +117,7 @@ def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]
                 next_run = time.time() + cfg.watch.rolling_minutes * 60
                 elapsed = time.time() - start_time
                 done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done,
-                             elapsed - LIVE_TAIL_MARGIN, clip_vod())
+                             elapsed - LIVE_TAIL_MARGIN, clip_vod(), dry_run)
     except KeyboardInterrupt:
         log.info("中断されました。録画を止めて、ここまでの分を処理します")
         proc.terminate()
@@ -121,7 +136,7 @@ def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]
         log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
         return done
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
-    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod())
+    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod(), dry_run)
     return done
 
 
@@ -140,21 +155,21 @@ def _stream_started_at(helix, channel: str) -> float | None:
     return None
 
 
-def find_stream_vod(helix, channel: str, record_start: float,
-                    stream_started: float | None = None) -> tuple[str, float] | None:
+def find_stream_vod(helix, channel: str, record_start: float, stream_started: float | None = None,
+                    user_id: str | None = None) -> tuple[str, float] | None:
     """録画中の配信の VOD と、録画の 0 秒が VOD の何秒目か (= 録画開始の遅れ) を返す。
 
     stream_started: 配信の開始時刻 (Get Streams の started_at)。分かればそれと VOD の開始が一致するものを選ぶ。
-    分からなければ「録画開始より前に始まり、録画開始の時点まで続いている」VOD を選ぶ。
-    前回の配信の VOD を取り違えないよう、どちらにも当てはまらなければ None。
+    分からなければ「録画開始より前に始まり、録画開始の時点より後まで続いている」VOD を選ぶ
+    (直前に終わった前回の配信の VOD は録画開始の時点で終わっているので選ばれない)。
     """
-    user_id = helix.get_user_id(channel)
+    user_id = user_id or helix.get_user_id(channel)
     for v in helix.get_recent_archives(user_id, 3):
         started = v.created_at.timestamp()
         if stream_started is not None:
             same = abs(started - stream_started) <= 600
         else:
-            same = started <= record_start + 120 and started + v.duration >= record_start - 600
+            same = started <= record_start + 120 and started + v.duration > record_start + 60
         if same:
             return v.id, max(0.0, record_start - started)
     return None
@@ -162,13 +177,14 @@ def find_stream_vod(helix, channel: str, record_start: float,
 
 def _run(cfg: Config, channel: str, video: Path, chat_path: Path, viewers_path: Path, run_dir: Path,
          done: list[Highlight], available_until: float | None,
-         clip_vod: tuple[str, float] | None = None) -> list[Highlight]:
+         clip_vod: tuple[str, float] | None = None, dry_run: bool = False) -> list[Highlight]:
     chat = load_chat(chat_path) if chat_path.exists() and chat_path.stat().st_size else []
     viewers = load_viewers(viewers_path) if viewers_path.exists() and viewers_path.stat().st_size else None
     try:
         result = process(
             cfg, LocalSource(str(video)), chat, run_dir, channel=channel,
             exclude=done, available_until=available_until, viewers=viewers, clip_vod=clip_vod,
+            dry_run=dry_run,
         )
     except Exception as e:
         log.warning("処理に失敗しました (次回に再試行します): %s", e)
@@ -178,12 +194,12 @@ def _run(cfg: Config, channel: str, video: Path, chat_path: Path, viewers_path: 
     return result.highlights
 
 
-def watch(cfg: Config, channel: str, once: bool = False) -> None:
+def watch(cfg: Config, channel: str, once: bool = False, dry_run: bool = False) -> None:
     checker = LiveChecker(cfg)
     while True:
         wait_until_live(cfg, channel, checker)
         log.info("%s が配信を開始しました", channel)
-        record_and_process(cfg, channel, checker.helix)
+        record_and_process(cfg, channel, checker.helix, dry_run=dry_run)
         if once:
             return
         # 配信終了直後の再接続などで即座に再録画しないよう少し待つ

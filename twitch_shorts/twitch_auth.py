@@ -110,11 +110,10 @@ def save_token(work_dir: str | Path, token: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     # 書き込み途中で電源が落ちても壊れないよう、別ファイルに書いてから置き換える
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(token, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        tmp.chmod(0o600)  # 自分だけが読めるように (Windows では無視される)
-    except OSError:
-        pass
+    # 最初から自分だけが読める権限で作る (Windows では権限指定は無視される)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(token, ensure_ascii=False, indent=2))
     os.replace(tmp, p)
 
 

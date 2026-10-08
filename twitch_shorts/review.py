@@ -42,7 +42,9 @@ def write_review_page(run_dir: Path, highlights: list[Highlight], score: np.ndar
         })
     data = {"channel": channel, "title": stream_title, "duration": duration,
             "score": _downsample(score), "items": items}
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    # チャットや AI の文字列に "<!--" や "</script>" があってもページが壊れないよう、< > & をエスケープする
+    payload = (json.dumps(data, ensure_ascii=False)
+               .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
     page = TEMPLATE.replace("__TITLE__", html.escape(f"{channel or '配信'} の切り抜き候補")).replace("__DATA__", payload)
     out = run_dir / "index.html"
     out.write_text(page, encoding="utf-8")
@@ -118,7 +120,7 @@ document.getElementById("sub").textContent = (DATA.title ? DATA.title + " ・ " 
 // タイムライン: 盛り上がりスコアの推移と、ショートにした区間
 (function () {
   const svg = document.getElementById("timeline"), pts = DATA.score, W = 1000, H = 120;
-  if (!pts.length) return;
+  if (pts.length < 2 || !(DATA.duration > 0)) return;
   const max = Math.max(1, ...pts), min = Math.min(0, ...pts);
   const y = v => H - 8 - (v - min) / (max - min) * (H - 16);
   const css = getComputedStyle(document.documentElement);

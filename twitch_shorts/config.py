@@ -205,6 +205,11 @@ def _apply(obj, data: dict, path: str = "") -> None:
             merged = dict(current)
             merged.update({str(k).lower(): float(v) for k, v in value.items()})
             setattr(obj, key, {k: v for k, v in merged.items() if v != 0})
+        elif isinstance(current, list) and not isinstance(value, list):
+            if key == "hashtags" and isinstance(value, str):
+                setattr(obj, key, value.split())  # "#a #b" のように 1 つの文字列で書かれた場合
+            else:
+                raise ValueError(f"{path}{key} は [...] のリストで指定してください")
         else:
             setattr(obj, key, value)
 

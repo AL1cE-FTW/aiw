@@ -85,14 +85,14 @@ def test_clip_from_vod_params_and_title_fallback(tmp_path):
         calls.append(dict(params))
         assert url.endswith("/helix/videos/clips")
         if "title" in params:
-            return Resp({"message": "unknown parameter"}, status=400)
+            return Resp({"message": "invalid parameter: title"}, status=400)
         return Resp({"data": [{"id": "Clip1", "edit_url": "https://clips.twitch.tv/Clip1/edit"}]})
 
     creator = ClipCreator("cid", UserToken("cid", "", tmp_path), session=FakeSession(handler))
     clip = creator.from_vod("v9", 125.4, 80, "神プレイ")
     assert clip["id"] == "Clip1"
     first, second = calls
-    assert first["vod_offset"] == 125 and first["duration"] == 60 and first["title"] == "神プレイ"
+    assert first["vod_offset"] == 126 and first["duration"] == 60 and first["title"] == "神プレイ"
     assert first["broadcaster_id"] == first["editor_id"] == "42"
     assert "title" not in second
 
@@ -162,12 +162,13 @@ def test_auto_enables_clips_only_for_logged_in_broadcaster(tmp_path, monkeypatch
     import twitch_shorts.watcher as w
 
     seen = {}
-    monkeypatch.setattr(w, "watch", lambda cfg, channel, once=False: seen.update(channel=channel,
-                                                                                clips=cfg.clips.enabled))
+    monkeypatch.setattr(w, "watch", lambda cfg, channel, once=False, **k: seen.update(channel=channel,
+                                                                                     clips=cfg.clips.enabled,
+                                                                                     dry_run=k.get("dry_run")))
     conf = tmp_path / "c.toml"
     conf.write_text(f'work_dir = "{tmp_path / "work"}"\n[twitch]\nclient_id = "cid"\nclient_secret = "s"\n')
     assert cli.main(["-c", str(conf), "auto", "Yuuki_FTW"]) == 0
-    assert seen == {"channel": "yuuki_ftw", "clips": False}  # 未ログイン
+    assert seen == {"channel": "yuuki_ftw", "clips": False, "dry_run": False}  # 未ログイン
     _token(tmp_path / "work")
     assert cli.main(["-c", str(conf), "auto", "yuuki_ftw"]) == 0
     assert seen["clips"] is True
@@ -280,7 +281,7 @@ def test_auto_requires_clip_scope(tmp_path, monkeypatch):
     import twitch_shorts.watcher as w
 
     seen = {}
-    monkeypatch.setattr(w, "watch", lambda cfg, channel, once=False: seen.update(clips=cfg.clips.enabled))
+    monkeypatch.setattr(w, "watch", lambda cfg, channel, once=False, **k: seen.update(clips=cfg.clips.enabled))
     conf = tmp_path / "c.toml"
     conf.write_text(f'work_dir = "{tmp_path / "work"}"\n[twitch]\nclient_id = "cid"\nclient_secret = "s"\n')
     save_token(tmp_path / "work", {"access_token": "a", "refresh_token": "r", "expires_at": time.time() + 999,
@@ -299,3 +300,127 @@ def test_doctor_unknown_font_and_forced_recorder(monkeypatch):
     checks = {c.name: c for c in doctor.run_checks(cfg)}
     assert checks["日本語フォント"].ok is None
     assert checks["録画ツール (streamlink)"].ok is False  # yt-dlp があっても streamlink 指定なら NG
+
+
+
+# --- 2 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_auto_passes_dry_run(tmp_path, monkeypatch):
+    import twitch_shorts.watcher as w
+
+    seen = {}
+    monkeypatch.setattr(w, "watch", lambda cfg, channel, once=False, dry_run=False: seen.update(dry_run=dry_run))
+    conf = tmp_path / "c.toml"
+    conf.write_text(f'work_dir = "{tmp_path / "work"}"\n')
+    assert cli.main(["-c", str(conf), "auto", "yuuki_ftw", "--dry-run"]) == 0
+    assert seen["dry_run"] is True
+
+
+def test_dry_run_watch_session_creates_no_clips(make_stream, tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    from twitch_shorts import twitch_clips
+
+    video, chat_path = make_stream(duration=100, events=(50,))
+    monkeypatch.setattr(watcher, "start_live_recording", lambda c, out, r, q: subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts", str(out)]))
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            shutil.copy(chat_path, self.out_path)
+
+        def stop(self):
+            pass
+
+    class FakeHelix:
+        def get_stream(self, login):
+            return {"viewer_count": 3, "started_at": "2026-10-08T12:00:00Z"}
+
+        def get_user_id(self, login):
+            return "42"
+
+        def get_recent_archives(self, uid, n):
+            return [VideoInfo("v1", "42", "yuuki_ftw", "Y", "t", datetime(2026, 10, 8, 12, tzinfo=timezone.utc), 999, "u")]
+
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", lambda *a, **k: pytest.fail("clip created in dry run"))
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.clips.enabled = True
+    _token(cfg.work_dir)
+    done = watcher.record_and_process(cfg, "yuuki_ftw", helix=FakeHelix(), dry_run=True)
+    assert done and all(not h.output_path and not h.twitch_clip for h in done)
+    assert all(h.vod_url.startswith("https://www.twitch.tv/videos/v1?t=") for h in done)
+
+
+def test_find_stream_vod_back_to_back_streams():
+    prev_start = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
+
+    class FakeHelix:
+        def get_user_id(self, login):
+            raise AssertionError("user_id は渡したものを使う")
+
+        def get_recent_archives(self, uid, count):
+            return [VideoInfo("prev", "42", "yuuki_ftw", "Y", "t", prev_start, 3600, "u")]
+
+    # 前の配信が終わった 5 分後に録画開始 (開始時刻は不明) → 前の VOD は選ばない
+    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", prev_start.timestamp() + 3600 + 300,
+                                   user_id="42") is None
+
+
+def test_earlier_highlights_get_clips_once_vod_is_found(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.pipeline import LocalSource, process
+
+    cfg, video, chat = _clip_setup(tmp_path, make_stream)
+    made = []
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod",
+                        lambda self, v, e, d, t="": made.append(e) or {"id": "C", "edit_url": f"https://clips.twitch.tv/{e}"})
+    earlier = Highlight(start=5, end=30, peak=20, score=9, title="前半", output_path="/x/early.mp4")
+    process(cfg, LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0), channel="yuuki_ftw",
+            exclude=[earlier])
+    assert earlier.twitch_clip and earlier.vod_url.endswith("t=0h0m5s")
+    assert len(made) == 2
+
+
+def test_clip_offset_never_below_duration_and_other_400_is_not_retried(tmp_path):
+    _token(tmp_path)
+    calls = []
+
+    def handler(method, url, params, data):
+        calls.append(dict(params))
+        return Resp({"message": "vod_offset out of range"}, status=400)
+
+    creator = ClipCreator("cid", UserToken("cid", "", tmp_path), session=FakeSession(handler))
+    with pytest.raises(ClipError):
+        creator.from_vod("v9", 5.3, 5.3, "タイトル")
+    assert len(calls) == 1  # title 以外のエラーで title を外した再試行はしない
+    assert calls[0]["vod_offset"] >= calls[0]["duration"]
+
+
+def test_template_type_errors_and_list_config(tmp_path):
+    from twitch_shorts.config import load_config
+    from twitch_shorts.pipeline import fill_template
+
+    assert fill_template("{index[0]} {channel}", {"index": 1, "channel": "y"}) == "{index[0]} {channel}"
+    p = tmp_path / "c.toml"
+    p.write_text('[publish]\nhashtags = "#shorts #Twitch切り抜き"\n', encoding="utf-8")
+    assert load_config(p).publish.hashtags == ["#shorts", "#Twitch切り抜き"]
+    p.write_text('[render]\nfacecam = "0,0,1,1"\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(p)
+
+
+def test_token_file_is_private(tmp_path):
+    import os
+    import stat
+
+    _token(tmp_path)
+    from twitch_shorts.twitch_auth import token_path
+
+    if os.name == "posix":
+        assert stat.S_IMODE(token_path(tmp_path).stat().st_mode) == 0o600

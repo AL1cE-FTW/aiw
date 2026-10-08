@@ -166,7 +166,7 @@ def cmd_auto(cfg: Config, args: argparse.Namespace) -> int:
         cfg.watch.rolling_minutes = args.rolling
     print("配信が始まると自動で録画し、終わったらショート動画"
           + ("と Twitch クリップ" if cfg.clips.enabled else "") + "を作ります。止めるときは Ctrl+C。")
-    watch(cfg, channel)
+    watch(cfg, channel, dry_run=args.dry_run)
     return 0
 
 
@@ -175,7 +175,7 @@ def cmd_watch(cfg: Config, args: argparse.Namespace) -> int:
 
     if args.rolling is not None:
         cfg.watch.rolling_minutes = args.rolling
-    watch(cfg, args.channel.lower(), once=args.once)
+    watch(cfg, args.channel.lower(), once=args.once, dry_run=args.dry_run)
     return 0
 
 
