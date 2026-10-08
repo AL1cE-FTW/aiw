@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import time
 from pathlib import Path
 
@@ -29,6 +30,10 @@ MIN_CLIP, MAX_CLIP = 5.0, 60.0
 
 class ClipError(RuntimeError):
     pass
+
+
+class ClipPermissionError(ClipError):
+    """このアカウントでは (このチャンネルの) クリップを作れない。以降の試行も無駄なので止める。"""
 
 
 class ClipCreator:
@@ -72,7 +77,7 @@ class ClipCreator:
                 time.sleep(max(1.0, min(reset - time.time(), 60)))
                 continue
             if r.status_code == 403:
-                raise ClipError("クリップを作る権限がありません (自分のチャンネルか、編集者になっているチャンネルか確認してください)")
+                raise ClipPermissionError("クリップを作る権限がありません (自分のチャンネルか、編集者になっているチャンネルか確認してください)")
             raise ClipError(f"クリップを作成できませんでした: {r.status_code} {r.text[:200]}")
         raise ClipError("クリップを作成できませんでした (再試行の上限)")
 
@@ -98,9 +103,23 @@ def _load_registry(path: Path | None) -> list[dict]:
     if not path or not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
         return []
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def clips_made_for(registry: Path | None, vod_id: str) -> int:
+    """この VOD で以前に作ったクリップの数 (1 配信あたりの上限の計算用)。"""
+    return sum(1 for r in _load_registry(registry) if r.get("vod_id") == vod_id)
+
+
+def _save_registry(path: Path, entries: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _find_existing(registry: list[dict], vod_id: str, end: float) -> dict | None:
@@ -127,10 +146,11 @@ def create_clips(creator: ClipCreator, vod_id: str, highlights: list[Highlight],
             continue
         try:
             clip = creator.from_vod(vod_id, end, duration, h.title)
+        except ClipPermissionError as e:
+            log.warning("Twitch クリップを作れませんでした: %s", e)
+            break
         except ClipError as e:
             log.warning("Twitch クリップを作れませんでした (%s): %s", h.title, e)
-            if "権限" in str(e):
-                break
             continue
         except (requests.RequestException, ValueError, KeyError) as e:  # 通信エラー・想定外の応答
             log.warning("Twitch クリップを作れませんでした (%s): %s", h.title, e)
@@ -141,6 +161,5 @@ def create_clips(creator: ClipCreator, vod_id: str, highlights: list[Highlight],
         known.append({"vod_id": vod_id, "end": round(end, 1), "duration": duration, "url": h.twitch_clip,
                       "id": clip.get("id", ""), "title": h.title})
         if registry:
-            registry.parent.mkdir(parents=True, exist_ok=True)
-            registry.write_text(json.dumps(known, ensure_ascii=False, indent=2), encoding="utf-8")
+            _save_registry(registry, known)
     return made

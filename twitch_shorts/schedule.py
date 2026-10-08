@@ -52,8 +52,14 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
     added: list[dict] = []
     # 1 日複数本のとき、前日の枠の一部は今日の早い時間にある (例: 19:00 と翌 07:00) ので前日から探す
     day = now.date() - timedelta(days=1)
+    by_path = {e["path"]: e for e in entries}
     for h in sorted(highlights, key=lambda h: h.score, reverse=True):
-        if not h.output_path or h.output_path in known:
+        if h.output_path in known:
+            # 登録済み: 後から作れた Twitch クリップの URL だけ反映する
+            if h.twitch_clip and not by_path[h.output_path].get("twitch_clip"):
+                by_path[h.output_path]["twitch_clip"] = h.twitch_clip
+            continue
+        if not h.output_path:
             continue
         slot = None
         while slot is None:

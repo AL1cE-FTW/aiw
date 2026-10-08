@@ -141,6 +141,7 @@ def test_pipeline_creates_clips_when_enabled(make_stream, tmp_path, monkeypatch)
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
     cfg.render.width, cfg.render.height = 360, 640
     cfg.clips.enabled = True
+    cfg.twitch.client_id = "cid"
     _token(cfg.work_dir)
     made = []
 
@@ -214,6 +215,7 @@ def _clip_setup(tmp_path, make_stream):
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
     cfg.render.width, cfg.render.height = 360, 640
     cfg.clips.enabled = True
+    cfg.twitch.client_id = "cid"
     _token(cfg.work_dir)
     return cfg, video, load_chat(chat_path)
 
@@ -424,3 +426,118 @@ def test_token_file_is_private(tmp_path):
 
     if os.name == "posix":
         assert stat.S_IMODE(token_path(tmp_path).stat().st_mode) == 0o600
+
+
+
+# --- 3 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_final_pass_retries_vod_lookup_and_applies_latency(make_stream, tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    video, chat_path = make_stream(duration=100, events=(50,))
+    monkeypatch.setattr(watcher, "start_live_recording", lambda c, out, r, q: subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts", str(out)]))
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            shutil.copy(chat_path, self.out_path)
+
+        def stop(self):
+            pass
+
+    started = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+    lookups = []
+
+    class FakeHelix:
+        def get_stream(self, login):
+            return None  # 開始時刻は不明
+
+        def get_user_id(self, login):
+            return "42"
+
+        def get_recent_archives(self, uid, n):
+            lookups.append(1)
+            return [VideoInfo("v1", "42", "yuuki_ftw", "Y", "t", started, 99999, "u")]
+
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
+    rec_start = started.timestamp() + 300
+    monkeypatch.setattr(watcher.time, "time", lambda: rec_start)
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.watch.rolling_minutes = 0
+    cfg.watch.stream_latency = 8.0
+    done = watcher.record_and_process(cfg, "yuuki_ftw", helix=FakeHelix(), dry_run=True)
+    assert lookups, "最後の処理では待ち時間に関係なく VOD を探す"
+    h = done[0]
+    # 録画の位置 + (録画開始 - 遅れ - 配信開始) = VOD の位置
+    expected = int(h.start + 300 - 8)
+    assert h.vod_url.endswith(f"t={expected // 3600}h{expected % 3600 // 60}m{expected % 60}s")
+
+
+def test_clip_limit_counts_earlier_runs_on_same_vod(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.pipeline import LocalSource, process
+
+    cfg, video, chat = _clip_setup(tmp_path, make_stream)
+    cfg.clips.max_per_stream = 1
+    (tmp_path / "work" / "twitch_clips.json").write_text(json.dumps([
+        {"vod_id": "v1", "end": 9999, "duration": 30, "url": "https://clips.twitch.tv/old"}]), encoding="utf-8")
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", lambda *a, **k: pytest.fail("上限を超えて作った"))
+    r = process(cfg, LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0), channel="yuuki_ftw")
+    assert r.highlights[0].twitch_clip == ""
+
+
+def test_registry_with_wrong_shape_is_ignored(tmp_path):
+    from twitch_shorts.twitch_clips import _load_registry, clips_made_for
+
+    p = tmp_path / "twitch_clips.json"
+    p.write_text("{}", encoding="utf-8")
+    assert _load_registry(p) == [] and clips_made_for(p, "v1") == 0
+    p.write_text('[{"vod_id": "v1"}, "junk", 3]', encoding="utf-8")
+    assert clips_made_for(p, "v1") == 1
+
+
+def test_permission_error_is_typed(tmp_path):
+    from twitch_shorts.twitch_clips import ClipPermissionError
+
+    _token(tmp_path)
+    creator = ClipCreator("cid", UserToken("cid", "", tmp_path),
+                          session=FakeSession(lambda *a: Resp({"message": "Forbidden"}, status=403)))
+    with pytest.raises(ClipPermissionError):
+        creator.from_vod("v9", 30, 30)
+
+
+def test_clips_need_scope_for_every_command(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.pipeline import LocalSource, process
+
+    cfg, video, chat = _clip_setup(tmp_path, make_stream)
+    save_token(cfg.work_dir, {"access_token": "a", "refresh_token": "r", "expires_at": time.time() + 999,
+                              "user_id": "42", "login": "yuuki_ftw", "scopes": ["user:read:email"]})
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", lambda *a, **k: pytest.fail("権限なしで作った"))
+    process(cfg, LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0), channel="yuuki_ftw")
+
+
+def test_schedule_picks_up_clip_created_later(tmp_path):
+    from twitch_shorts.schedule import add_to_schedule, load_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    h = Highlight(start=0, end=30, peak=5, score=1, title="a", output_path="/x/a.mp4")
+    add_to_schedule(cfg, [h])
+    h.twitch_clip = "https://clips.twitch.tv/late"
+    add_to_schedule(cfg, [h])
+    [e] = load_schedule(cfg)
+    assert e["twitch_clip"] == "https://clips.twitch.tv/late"
+
+
+def test_doctor_names_missing_ffprobe(monkeypatch):
+    from twitch_shorts import doctor
+
+    real = doctor.shutil.which
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "ffprobe" else real(n))
+    [ff] = [c for c in doctor.run_checks(Config()) if c.name == "ffmpeg"]
+    assert ff.ok is False and "ffprobe" in ff.detail

@@ -35,8 +35,9 @@ def _japanese_font() -> tuple[bool | None, str]:
 
 def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Check]:
     checks: list[Check] = []
-    ff = shutil.which("ffmpeg") and shutil.which("ffprobe")
-    checks.append(Check("ffmpeg", bool(ff), shutil.which("ffmpeg") or "インストールして PATH を通してください"))
+    missing = [t for t in ("ffmpeg", "ffprobe") if not shutil.which(t)]
+    checks.append(Check("ffmpeg", not missing, shutil.which("ffmpeg") if not missing
+                        else f"{' と '.join(missing)} が見つかりません。ffmpeg をインストールして PATH を通してください"))
     streamlink = shutil.which("streamlink")
     ytdlp = _has_module("yt_dlp")
     want = cfg.watch.recorder

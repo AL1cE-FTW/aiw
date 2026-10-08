@@ -66,9 +66,10 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
 
     proc = start_live_recording(channel, video_path, cfg.watch.recorder, cfg.watch.quality)
     start_time = time.time()
-    stream_started = _stream_started_at(helix, channel)
     chat_rec = LiveChatRecorder(channel, chat_path, start_time, cfg.twitch.irc_oauth_token, cfg.twitch.irc_nick)
     chat_rec.start()
+    # チャットの記録を始めてから問い合わせる (API が遅くても配信冒頭のチャットを取りこぼさない)
+    stream_started = _stream_started_at(helix, channel)
     viewer_rec = None
     if helix is not None:
         viewer_rec = ViewerRecorder(helix, channel, viewers_path, start_time, cfg.watch.viewer_poll_interval)
@@ -80,14 +81,15 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     vod_state: dict = {"vod": None, "user_id": None, "next_try": 0.0, "warned": False,
                        "started": stream_started}
 
-    def clip_vod() -> tuple[str, float] | None:
+    def clip_vod(force: bool = False) -> tuple[str, float] | None:
         """この配信の VOD を探す (クリップ作成と、場面へのリンク用)。
 
         見つかるまでは 10 分おきに探し直し、見つからない旨の警告は 1 回だけ出す。
+        force: 待ち時間を無視して探す (配信終了後の最後の処理用)。
         """
         if helix is None or vod_state["vod"] is not None:
             return vod_state["vod"]
-        if time.time() < vod_state["next_try"]:
+        if not force and time.time() < vod_state["next_try"]:
             return None
         vod_state["next_try"] = time.time() + VOD_RETRY_SECONDS
         try:
@@ -95,7 +97,9 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
                 vod_state["started"] = _stream_started_at(helix, channel)
             if vod_state["user_id"] is None:
                 vod_state["user_id"] = helix.get_user_id(channel)
-            found = find_stream_vod(helix, channel, start_time, vod_state["started"], vod_state["user_id"])
+            # 録画は配信より少し遅れて届くので、その分だけ VOD 上では前の位置になる
+            found = find_stream_vod(helix, channel, start_time - cfg.watch.stream_latency,
+                                    vod_state["started"], vod_state["user_id"])
         except Exception as e:
             log.warning("この配信の VOD を確認できませんでした: %s", e)
             return None
@@ -136,7 +140,8 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
         return done
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
-    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod(), dry_run)
+    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod(force=True),
+                 dry_run)
     return done
 
 

@@ -151,6 +151,8 @@ class WatchConfig:
     rolling_minutes: int = 0
     # 同時視聴者数を記録する間隔 (秒)。Twitch API の認証情報がある場合のみ記録する
     viewer_poll_interval: int = 60
+    # 録画 (HLS) が実際の配信から遅れて届く秒数の目安。録画の位置を VOD の位置に直すときに使う
+    stream_latency: float = 8.0
     recorder: str = "auto"  # auto / streamlink / yt-dlp
     quality: str = "best"
 
@@ -206,8 +208,9 @@ def _apply(obj, data: dict, path: str = "") -> None:
             merged.update({str(k).lower(): float(v) for k, v in value.items()})
             setattr(obj, key, {k: v for k, v in merged.items() if v != 0})
         elif isinstance(current, list) and not isinstance(value, list):
-            if key == "hashtags" and isinstance(value, str):
-                setattr(obj, key, value.split())  # "#a #b" のように 1 つの文字列で書かれた場合
+            # 文字列のリストの項目は "#a #b" のように 1 つの文字列で書かれても受け付ける
+            if isinstance(value, str) and all(isinstance(x, str) for x in current):
+                setattr(obj, key, value.split())
             else:
                 raise ValueError(f"{path}{key} は [...] のリストで指定してください")
         else:
