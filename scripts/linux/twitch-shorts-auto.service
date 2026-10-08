@@ -15,6 +15,8 @@ RestartSec=60
 TimeoutStopSec=1h
 # 停止の合図は本体だけに送る (書き出し中の ffmpeg まで止めない)
 KillMode=mixed
+# 停止の指示で処理を終えて正常に止まったとき (終了コード 130) を失敗扱いにしない
+SuccessExitStatus=130
 
 [Install]
 WantedBy=default.target

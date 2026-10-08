@@ -21,6 +21,7 @@ from typing import Callable, Iterable, Iterator
 
 import requests
 
+from .fileutil import read_jsonl
 from .models import ChatMessage
 
 GQL_URL = "https://gql.twitch.tv/gql"
@@ -134,7 +135,7 @@ def load_chat(path: str | Path) -> list[ChatMessage]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         # 1 行 1 JSON の JSONL (記録中の停電などで壊れた行は飛ばす)
-        msgs = [ChatMessage.from_dict(d) for d in _jsonl_records(raw)]
+        msgs = [ChatMessage.from_dict(d) for d in read_jsonl(raw) if "offset" in d]
         return sorted(msgs, key=lambda m: m.offset)
     if isinstance(data, dict) and "offset" in data:  # 1 件だけの JSONL
         return [ChatMessage.from_dict(data)]
@@ -171,20 +172,6 @@ def load_chat(path: str | Path) -> list[ChatMessage]:
     else:
         raise ValueError(f"チャットファイルの形式を判別できません: {path}")
     return sorted(msgs, key=lambda m: m.offset)
-
-
-def _jsonl_records(raw: str) -> list[dict]:
-    out = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(d, dict) and "offset" in d:
-            out.append(d)
-    return out
 
 
 def _looks_like_gql(data) -> bool:

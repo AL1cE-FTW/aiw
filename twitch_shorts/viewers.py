@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+from .fileutil import read_jsonl
 from .models import ViewerSample
 
 log = logging.getLogger(__name__)
@@ -30,12 +31,7 @@ def load_viewers(path: str | Path) -> list[ViewerSample]:
             data = json.loads(raw)
             items = data if isinstance(data, list) else [data]
         except json.JSONDecodeError:
-            items = []
-            for line in raw.splitlines():
-                try:
-                    items.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # 記録中の停電などで壊れた行は飛ばす
+            items = read_jsonl(raw)  # 記録中の停電などで壊れた行は飛ばす
         samples = []
         for d in items:
             try:

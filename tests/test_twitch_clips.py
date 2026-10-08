@@ -1138,7 +1138,7 @@ def test_recording_pass_with_no_rendered_short_counts_as_failure(make_stream, tm
     monkeypatch.setattr(pipeline, "render_highlight", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     out = watcher._final_pass(cfg, "yuuki_ftw", None, 0.0, None, session,
                               tmp_path / "out" / "yuuki_ftw" / session.name, False)
-    assert out == [] and not (session / "processed").exists()
+    assert out is None and not (session / "processed").exists()  # 失敗は None (次回やり直す)
 
 
 def test_dry_run_sessions_are_not_processed_later(make_stream, tmp_path, monkeypatch):
@@ -1202,16 +1202,102 @@ def test_vod_pass_uses_known_vod_duration(make_stream, tmp_path, monkeypatch):
     assert seen["duration"] == 7200.0
 
 
-def test_stale_lock_is_taken_over(tmp_path):
-    import os
-
+def test_leftover_lock_file_from_crash_does_not_block(tmp_path):
     from twitch_shorts.fileutil import file_lock
 
     target = tmp_path / "x.json"
-    lock = tmp_path / "x.json.lock"
-    lock.write_text("123")
-    old = lock.stat().st_mtime - 3600
-    os.utime(lock, (old, old))
+    (tmp_path / "x.json.lock").write_text("123")  # 異常終了で残ったロックファイル (OS のロックは無い)
     with file_lock(target, timeout=1):
-        assert lock.exists()
-    assert not lock.exists() and not list(tmp_path.glob("*.stale.*"))
+        pass
+
+
+# --- 11 回目のレビュー指摘の回帰テスト --------------------------------------
+
+class _Checker:
+    def __init__(self, live, helix=None):
+        self.live, self.helix = live, helix
+
+    def is_live(self, channel):
+        return self.live
+
+
+def test_leftovers_wait_while_live(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: pytest.fail("配信中に処理した"))
+    watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(True))
+
+
+def test_leftover_covered_by_another_session_is_skipped(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    watcher._save_meta(session, start_time=1000.0, stream_started=900.0)
+    other = session.parent / "20261008_210000"
+    other.mkdir()
+    watcher._save_meta(other, vod_id="v1")
+    (other / "processed").write_text("x")
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 100.0, 9999.0))
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: pytest.fail("同じ VOD を二重に作った"))
+    watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
+    assert (session / "processed").exists()
+
+
+def test_leftover_uses_vod_first_when_meta_known(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    watcher._save_meta(session, start_time=1000.0, stream_started=900.0)
+    calls = []
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: None)
+    monkeypatch.setattr(watcher, "_final_pass", lambda cfg, ch, h, st, ss, *a: calls.append((st, ss)) or [])
+    watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
+    assert calls == [(1000.0, 900.0)] and (session / "processed").exists()
+
+
+def test_tiny_failing_part_does_not_fail_the_session(make_stream, tmp_path):
+    cfg, session = _session(tmp_path, make_stream)
+    (session / "stream_2.ts").write_bytes(b"\x00" * 100)  # 配信終了間際に録り直してすぐ終わった分
+    watcher._save_parts(session, [(session / "stream.ts", 0.0), (session / "stream_2.ts", 100.0)])
+    out = watcher._run_from_recording(cfg, "yuuki_ftw", session, tmp_path / "o", False)
+    assert out and out[0].output_path
+
+
+def test_stop_before_restarting_recorder(tmp_path, monkeypatch):
+    class Proc:
+        returncode = 0
+        stderr = None
+
+        def poll(self):
+            watcher._STOP.set()  # 録画中に停止の指示が来て、同時に録画も終わった
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+    starts = []
+
+    def rec(c, out, r, q):
+        starts.append(out.name)
+        out.write_bytes(b"data")
+        return Proc()
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            self.out_path.write_text("", encoding="utf-8")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(watcher, "start_live_recording", rec)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")),
+                                       "ch", helix=object())
+    finally:
+        watcher._STOP.clear()
+    assert starts == ["stream.ts"]

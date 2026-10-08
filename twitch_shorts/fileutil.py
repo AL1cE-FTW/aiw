@@ -33,44 +33,73 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
         raise
 
 
-@contextmanager
-def file_lock(path: str | Path, timeout: float = 120.0, stale: float = 600.0):
-    """別のプロセスと同じファイルを読み書きするときの簡易ロック (``<path>.lock`` を作る)。
+def read_jsonl(text: str) -> list[dict]:
+    """1 行 1 JSON のテキストを読む。記録中の停電などで壊れた行や、オブジェクトでない行は飛ばす。"""
+    out = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
 
-    ロックが stale 秒より古い (前回の異常終了の残り) 場合だけ奪う。使用中のロックは奪わず、
+
+def _try_lock(fd: int) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def file_lock(path: str | Path, timeout: float = 120.0):
+    """別のプロセス・スレッドと同じファイルを読み書きするときのロック (``<path>.lock`` に OS のロックをかける)。
+
+    OS のロックなので、持っていたプロセスが異常終了しても自動で解放される (古いロックが残らない)。
     timeout 秒待っても取れなければ TimeoutError。
     """
     lock = Path(str(path) + ".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.time() + timeout
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            break
-        except FileExistsError:
-            try:
-                too_old = time.time() - lock.stat().st_mtime > stale
-            except OSError:
-                continue  # ちょうど消えた
-            if too_old:
-                # 古いロックは名前を変えてから消す (rename は 1 つのプロセスしか成功しないので、
-                # 複数のプロセスが同時に「古い」と判断しても、新しく作られたロックを消してしまわない)
-                grave = lock.with_name(f"{lock.name}.stale.{os.getpid()}.{time.monotonic_ns()}")
-                try:
-                    os.rename(lock, grave)
-                    os.unlink(grave)
-                except OSError:
-                    pass
-                continue
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        deadline = time.time() + timeout
+        while not _try_lock(fd):
             if time.time() > deadline:
                 raise TimeoutError(f"{lock} を使っている別の処理が終わりません")
-            time.sleep(0.1)
-    try:
-        yield
-    finally:
+            time.sleep(0.05)
         try:
-            lock.unlink()
-        except OSError:
-            pass
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
