@@ -13,12 +13,12 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import time
 from pathlib import Path
 
 import requests
 
+from .fileutil import write_json_atomic
 from .models import Highlight
 from .twitch_auth import UserToken
 
@@ -115,35 +115,40 @@ def clips_made_for(registry: Path | None, vod_id: str) -> int:
     return sum(1 for r in _load_registry(registry) if r.get("vod_id") == vod_id)
 
 
-def _save_registry(path: Path, entries: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-
-
 def _find_existing(registry: list[dict], vod_id: str, end: float) -> dict | None:
     """同じ VOD のほぼ同じ位置 (終わり位置が 10 秒以内) に、以前作ったクリップがあれば返す。"""
     return next((r for r in registry if r.get("vod_id") == vod_id and abs(float(r.get("end", -1e9)) - end) < 10), None)
 
 
-def create_clips(creator: ClipCreator, vod_id: str, highlights: list[Highlight],
-                 shift: float = 0.0, limit: int = 5, registry: Path | None = None) -> list[Highlight]:
-    """ハイライトごとにクリップを作り、URL を ``h.twitch_clip`` に記録する。失敗しても他は続ける。
+def public_clip_url(clip_id: str) -> str:
+    return f"https://clips.twitch.tv/{clip_id}"
 
-    registry: 作ったクリップの記録 (JSON)。同じ VOD を処理し直しても同じ場面のクリップを重複して作らない。
+
+def create_clips(creator: ClipCreator | None, vod_id: str, highlights: list[Highlight],
+                 shift: float = 0.0, limit: int = 5, registry: Path | None = None) -> list[Highlight]:
+    """ハイライトごとにクリップを作り、公開 URL を ``h.twitch_clip`` に記録する。失敗しても他は続ける。
+
+    registry: 作ったクリップの記録 (JSON)。同じ場面のクリップが記録にあれば作らずにそれを使う
+              (上限 ``limit`` は新しく作る本数だけに数える)。
+    creator が None なら、記録にあるクリップを結び付けるだけで新しくは作らない。
     """
     known = _load_registry(registry)
-    made: list[Highlight] = []
-    for h in sorted(highlights, key=lambda h: h.score, reverse=True)[:limit]:
+    pending: list[tuple[Highlight, float, float]] = []
+    for h in sorted(highlights, key=lambda h: h.score, reverse=True):
         if h.twitch_clip:
             continue
         end, duration = clip_window(h, shift)
         existing = _find_existing(known, vod_id, end)
         if existing:
             h.twitch_clip = existing["url"]
-            log.info("作成済みの Twitch クリップを使います: %s", h.twitch_clip)
+            h.twitch_clip_edit = existing.get("edit_url", "")
             continue
+        pending.append((h, end, duration))
+
+    made: list[Highlight] = []
+    for h, end, duration in pending:
+        if creator is None or len(made) >= limit:
+            break
         try:
             clip = creator.from_vod(vod_id, end, duration, h.title)
         except ClipPermissionError as e:
@@ -155,11 +160,13 @@ def create_clips(creator: ClipCreator, vod_id: str, highlights: list[Highlight],
         except (requests.RequestException, ValueError, KeyError) as e:  # 通信エラー・想定外の応答
             log.warning("Twitch クリップを作れませんでした (%s): %s", h.title, e)
             continue
-        h.twitch_clip = clip.get("edit_url") or f"https://clips.twitch.tv/{clip.get('id', '')}"
+        # 視聴者に共有できる公開 URL と、配信者用の編集ページを分けて持つ
+        h.twitch_clip = public_clip_url(clip["id"]) if clip.get("id") else clip.get("edit_url", "")
+        h.twitch_clip_edit = clip.get("edit_url", "")
         log.info("Twitch クリップを作成: %s  %s", h.title, h.twitch_clip)
         made.append(h)
         known.append({"vod_id": vod_id, "end": round(end, 1), "duration": duration, "url": h.twitch_clip,
-                      "id": clip.get("id", ""), "title": h.title})
+                      "edit_url": h.twitch_clip_edit, "id": clip.get("id", ""), "title": h.title})
         if registry:
-            _save_registry(registry, known)
+            write_json_atomic(registry, known)
     return made

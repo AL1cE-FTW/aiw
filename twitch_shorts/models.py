@@ -72,7 +72,8 @@ class Highlight:
     transcript: str = ""
     output_path: str = ""
     video_duration: float = 0.0  # 書き出した動画の実際の長さ (先見せを含む)
-    twitch_clip: str = ""  # 作成した Twitch 公式クリップの URL
+    twitch_clip: str = ""  # 作成した Twitch 公式クリップの公開 URL (視聴者に共有できる)
+    twitch_clip_edit: str = ""  # そのクリップの編集ページ (配信者本人のみ)
     vod_url: str = ""  # VOD のこの場面を開く URL (手動でクリップするとき用)
 
     @property

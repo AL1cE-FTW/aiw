@@ -119,6 +119,7 @@ def process(
     llm_client=None,
     viewers: list[ViewerSample] | None = None,
     clip_vod: tuple[str, float] | None = None,
+    clip_owner: str | None = None,
 ) -> RunResult:
     """ハイライトを検出し、ショート動画を ``run_dir`` に書き出す。
 
@@ -126,6 +127,7 @@ def process(
     available_until:  これより後ろにかかる区間は採用しない (録画中のファイル用)
     clip_vod:         (VOD の ID, ハイライトの時刻を VOD 上の時刻にするために足す秒数)。
                       clips.enabled のとき、この VOD から Twitch の公式クリップを作る
+    clip_owner:       VOD の持ち主のチャンネル名 (省略時は channel)。クリップを作れるかの判定に使う
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +212,7 @@ def process(
     pending = selected + [e for e in exclude if e.output_path and not e.twitch_clip]
     if cfg.clips.enabled and clip_vod and pending and not dry_run:
         _make_twitch_clips(cfg, pending, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
-                           channel=channel)
+                           owner=channel if clip_owner is None else clip_owner)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
     try:
         from .review import write_review_page
@@ -223,8 +225,8 @@ def process(
         from .schedule import add_to_schedule
 
         try:
-            # 前回までの分も渡す (後から作れた Twitch クリップの URL を予定表に反映するため)
-            for e in add_to_schedule(cfg, selected + exclude, channel):
+            # 前回までの分は追加せず、後から作れた Twitch クリップの URL だけ予定表に反映する
+            for e in add_to_schedule(cfg, selected, channel, update_only=exclude):
                 log.info("投稿予定: %s  %s", e["publish_at"][:16].replace("T", " "), e["title"])
         except (ValueError, KeyError, OSError) as e:  # 設定ミスで書き出し済みの結果を失わないように
             log.warning("投稿予定表に追加できませんでした ([publish] の設定を確認してください): %s", e)
@@ -236,9 +238,15 @@ def _fill_post_text(cfg: Config, h: Highlight, channel: str, index: int = 1) -> 
     if not h.description:
         h.description = fill_template(cfg.publish.description_template,
                                       _template_vars(h, index, channel or "配信"))
-    tags = list(h.hashtags)
-    for t in cfg.publish.hashtags:
-        if t.lower() not in {x.lower() for x in tags}:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for t in [*h.hashtags, *cfg.publish.hashtags]:
+        t = t.strip()
+        if not t:
+            continue
+        t = t if t.startswith("#") else f"#{t}"
+        if t.lower() not in seen:
+            seen.add(t.lower())
             tags.append(t)
     h.hashtags = tags
 
@@ -252,29 +260,33 @@ def vod_timestamp_url(video_id: str, seconds: float) -> str:
 
 
 def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple[str, float], already: int,
-                       channel: str) -> None:
-    """Twitch の公式クリップを作る。任意の機能なので、失敗してもショートの結果には影響させない。"""
+                       owner: str) -> None:
+    """Twitch の公式クリップを作る。任意の機能なので、失敗してもショートの結果には影響させない。
+
+    owner: VOD の持ち主 (チャンネル名)。ログイン中のアカウントと一致するときだけ作る。
+    """
     from .twitch_auth import TwitchAuthError, UserToken, can_create_clips
     from .twitch_clips import ClipCreator, clips_made_for, create_clips
 
     vod_id, shift = clip_vod
     registry = Path(cfg.work_dir) / "twitch_clips.json"
     # 同じ VOD を処理し直した分も含めて、1 配信あたりの上限を守る
-    limit = cfg.clips.max_per_stream - max(already, clips_made_for(registry, vod_id))
-    if limit <= 0:
-        return
+    limit = max(0, cfg.clips.max_per_stream - max(already, clips_made_for(registry, vod_id)))
+    creator = None
+    if limit > 0:
+        try:
+            token = UserToken(cfg.twitch.client_id, cfg.twitch.client_secret, cfg.work_dir)
+            # クリップは、クリップ作成の許可がある配信者本人のアカウントでのみ作る
+            if cfg.twitch.client_id and owner and can_create_clips(token.token, owner):
+                creator = ClipCreator(cfg.twitch.client_id, token)
+            else:
+                log.warning("Twitch クリップは作りません: %s のクリップを作れるログインがありません "
+                            "(配信者本人のアカウントで twitch-shorts login してください)", owner or "この VOD")
+        except TwitchAuthError as e:
+            log.warning("Twitch クリップは作りません: %s", e)
     try:
-        token = UserToken(cfg.twitch.client_id, cfg.twitch.client_secret, cfg.work_dir)
-    except TwitchAuthError as e:
-        log.warning("Twitch クリップは作りません: %s", e)
-        return
-    # クリップは、クリップ作成の許可がある配信者本人のアカウントでのみ作る
-    if not cfg.twitch.client_id or not channel or not can_create_clips(token.token, channel):
-        log.warning("Twitch クリップは作りません: %s のクリップを作れるログインがありません "
-                    "(配信者本人のアカウントで twitch-shorts login してください)", channel or "このチャンネル")
-        return
-    try:
-        create_clips(ClipCreator(cfg.twitch.client_id, token), vod_id, highlights, shift, limit, registry=registry)
+        # 新しく作れない場合も、以前作ったクリップは結び付ける
+        create_clips(creator, vod_id, highlights, shift, limit, registry=registry)
     except Exception as e:  # 通信エラー等。ショート自体は作れているので続ける
         log.warning("Twitch クリップを作れませんでした: %s", e)
 

@@ -64,10 +64,12 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     channel, title, duration, clips = args.channel or "", "", None, []
+    owner = ""  # VOD の持ち主 (クリップを作れるかの判定用)。API で確認できたときだけ分かる
     if cfg.twitch.client_id and cfg.twitch.client_secret:
         helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
         info = helix.get_video(video_id)
         channel, title, duration = channel or info.user_login, info.title, info.duration
+        owner = info.user_login
         if not args.no_clips:
             clips = helix.get_clips_for_video(info)
             log.info("既存クリップ %d 件をシグナルとして使用", len(clips))
@@ -90,7 +92,7 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
     src = VodSource(url, work, quality=args.quality, full_download=args.full_download)
     result = process(cfg, src, chat, Path(cfg.output_dir) / f"{channel or 'vod'}_{video_id}",
                      duration=duration, clips=clips, channel=channel, stream_title=title, dry_run=args.dry_run,
-                     clip_vod=(video_id, 0.0))
+                     clip_vod=(video_id, 0.0), clip_owner=owner)
     _print_result(result.highlights)
     return 0
 
@@ -289,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
-    def add_render_opts(sp):
+    def add_render_opts(sp, twitch_clips: bool = True):
         sp.add_argument("-o", "--output", help="出力ディレクトリ")
         sp.add_argument("-n", "--top", type=int, help="作成するショート動画の本数")
         sp.add_argument("--layout", choices=["blur", "crop", "facecam"])
@@ -297,8 +299,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--transcribe", action="store_true", help="faster-whisper で字幕を付ける")
         sp.add_argument("--no-subtitles", action="store_true")
         sp.add_argument("--dry-run", action="store_true", help="検出だけ行い動画は作らない")
-        sp.add_argument("--twitch-clips", action="store_true",
-                        help="検出した場面を Twitch の公式クリップとしても作る (要 login)")
+        if twitch_clips:
+            sp.add_argument("--twitch-clips", action="store_true",
+                            help="検出した場面を Twitch の公式クリップとしても作る (要 login)")
 
     sp = sub.add_parser("vod", help="VOD からショート動画を作る")
     sp.add_argument("vod", help="VOD の URL または ID")
@@ -349,7 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--channel")
     sp.add_argument("--title", help="配信タイトル (LLM への文脈)")
     sp.add_argument("--name", help="出力サブディレクトリ名")
-    add_render_opts(sp)
+    add_render_opts(sp, twitch_clips=False)  # 手元のファイルには VOD が無いのでクリップは作れない
     sp.set_defaults(func=cmd_local)
 
     sp = sub.add_parser("analyze", help="人気クリップを分析し、レポートと推奨設定を作る")

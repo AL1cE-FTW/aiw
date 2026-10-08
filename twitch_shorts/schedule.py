@@ -41,8 +41,11 @@ def _slot_times(cfg: Config, day: date, tz: ZoneInfo) -> list[datetime]:
 
 
 def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
-                    now: datetime | None = None) -> list[dict]:
-    """書き出し済みのハイライトを空いている投稿枠に入れ、追加した予定を返す。"""
+                    now: datetime | None = None, update_only: list[Highlight] | tuple = ()) -> list[dict]:
+    """書き出し済みのハイライトを空いている投稿枠に入れ、追加した予定を返す。
+
+    update_only: 予定には追加せず、登録済みなら後から作れた Twitch クリップの URL だけ反映するもの。
+    """
     tz = ZoneInfo(cfg.publish.timezone)
     now = (now or datetime.now(tz)).astimezone(tz)
     entries = load_schedule(cfg)
@@ -53,13 +56,12 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
     # 1 日複数本のとき、前日の枠の一部は今日の早い時間にある (例: 19:00 と翌 07:00) ので前日から探す
     day = now.date() - timedelta(days=1)
     by_path = {e["path"]: e for e in entries}
+    for h in [*highlights, *update_only]:
+        # 登録済み: 後から作れた Twitch クリップの URL だけ反映する
+        if h.output_path in by_path and h.twitch_clip and not by_path[h.output_path].get("twitch_clip"):
+            by_path[h.output_path]["twitch_clip"] = h.twitch_clip
     for h in sorted(highlights, key=lambda h: h.score, reverse=True):
-        if h.output_path in known:
-            # 登録済み: 後から作れた Twitch クリップの URL だけ反映する
-            if h.twitch_clip and not by_path[h.output_path].get("twitch_clip"):
-                by_path[h.output_path]["twitch_clip"] = h.twitch_clip
-            continue
-        if not h.output_path:
+        if not h.output_path or h.output_path in known:
             continue
         slot = None
         while slot is None:

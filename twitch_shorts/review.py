@@ -38,7 +38,8 @@ def write_review_page(run_dir: Path, highlights: list[Highlight], score: np.ndar
             "title": h.title, "hook": h.hook, "category": h.category or "未分類", "score": h.score,
             "start": h.start, "end": h.end, "peak": h.peak, "signals": h.signals, "reason": h.reason,
             "description": h.description, "hashtags": h.hashtags, "chat": h.chat_sample[:12],
-            "video": video, "twitch_clip": h.twitch_clip, "vod_url": h.vod_url,
+            "video": video, "twitch_clip": h.twitch_clip, "twitch_clip_edit": h.twitch_clip_edit,
+            "vod_url": h.vod_url,
         })
     data = {"channel": channel, "title": stream_title, "duration": duration,
             "score": _downsample(score), "items": items}
@@ -180,6 +181,7 @@ function render() {
     cp.onclick = () => copy([it.title, it.description, it.hashtags.join(" ")].filter(Boolean).join("\\n"), cp);
     act.appendChild(cp);
     if (it.twitch_clip) { const a = el("a", null, "Twitch クリップ"); a.href = it.twitch_clip; a.target = "_blank"; act.appendChild(a); }
+    if (it.twitch_clip_edit) { const a = el("a", null, "クリップを編集"); a.href = it.twitch_clip_edit; a.target = "_blank"; act.appendChild(a); }
     if (it.vod_url) { const a = el("a", null, "VOD で開く"); a.href = it.vod_url; a.target = "_blank"; act.appendChild(a); }
     b.appendChild(act); c.appendChild(b); grid.appendChild(c);
   });

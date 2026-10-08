@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Callable
 
 import requests
+
+from .fileutil import write_json_atomic
 
 DEVICE_URL = "https://id.twitch.tv/oauth2/device"
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
@@ -106,15 +107,8 @@ def _with_identity(token: dict, session: requests.Session) -> dict:
 
 
 def save_token(work_dir: str | Path, token: dict) -> None:
-    p = token_path(work_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # 書き込み途中で電源が落ちても壊れないよう、別ファイルに書いてから置き換える
-    tmp = p.with_suffix(".tmp")
-    # 最初から自分だけが読める権限で作る (Windows では権限指定は無視される)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps(token, ensure_ascii=False, indent=2))
-    os.replace(tmp, p)
+    # 書き込み途中で電源が落ちても壊れず、最初から自分だけが読める権限で保存する
+    write_json_atomic(token_path(work_dir), token, private=True)
 
 
 def load_token(work_dir: str | Path) -> dict | None:

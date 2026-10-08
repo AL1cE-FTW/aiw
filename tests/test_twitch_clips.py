@@ -156,7 +156,9 @@ def test_pipeline_creates_clips_when_enabled(make_stream, tmp_path, monkeypatch)
     [(vod_id, end, dur)] = made
     assert vod_id == "v1" and end == pytest.approx(h.end + 30) and dur == pytest.approx(h.end - h.start)
     report = json.loads((tmp_path / "out" / "run" / "highlights.json").read_text(encoding="utf-8"))
-    assert report["highlights"][0]["twitch_clip"] == "https://clips.twitch.tv/C/edit"
+    # 共有用の公開 URL と、配信者用の編集ページを分けて記録する
+    assert report["highlights"][0]["twitch_clip"] == "https://clips.twitch.tv/C"
+    assert report["highlights"][0]["twitch_clip_edit"] == "https://clips.twitch.tv/C/edit"
 
 
 def test_auto_enables_clips_only_for_logged_in_broadcaster(tmp_path, monkeypatch):
@@ -541,3 +543,131 @@ def test_doctor_names_missing_ffprobe(monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "ffprobe" else real(n))
     [ff] = [c for c in doctor.run_checks(Config()) if c.name == "ffmpeg"]
     assert ff.ok is False and "ffprobe" in ff.detail
+
+
+
+# --- 4 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_ctrl_c_processes_then_exits(make_stream, tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    video, chat_path = make_stream(duration=60, events=(30,))
+
+    class Proc:
+        returncode = None
+        stderr = None
+
+        def __init__(self, out):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts", str(out)],
+                           check=True)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            shutil.copy(chat_path, self.out_path)
+
+        def stop(self):
+            pass
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watcher, "start_live_recording", lambda c, out, r, q: Proc(out))
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher.time, "sleep", interrupt)
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    with pytest.raises(KeyboardInterrupt):
+        watcher.record_and_process(cfg, "yuuki_ftw", dry_run=True)
+    # 中断前に、ここまでの分は処理されている
+    assert list((tmp_path / "out" / "yuuki_ftw").glob("*/highlights.json"))
+
+
+def test_existing_clips_are_linked_even_when_limit_reached(tmp_path):
+    from twitch_shorts.twitch_clips import create_clips
+
+    reg = tmp_path / "twitch_clips.json"
+    reg.write_text(json.dumps([{"vod_id": "v1", "end": 30, "url": "https://clips.twitch.tv/A"},
+                               {"vod_id": "v1", "end": 130, "url": "https://clips.twitch.tv/B"}]), encoding="utf-8")
+    hs = [Highlight(start=0, end=30, peak=10, score=1), Highlight(start=100, end=130, peak=110, score=9),
+          Highlight(start=200, end=230, peak=210, score=5)]
+    made = create_clips(None, "v1", hs, limit=0, registry=reg)
+    assert made == []
+    assert [h.twitch_clip for h in hs] == ["https://clips.twitch.tv/A", "https://clips.twitch.tv/B", ""]
+
+
+def test_reused_clips_do_not_use_up_new_clip_slots(tmp_path):
+    from twitch_shorts.twitch_clips import create_clips
+
+    reg = tmp_path / "twitch_clips.json"
+    reg.write_text(json.dumps([{"vod_id": "v1", "end": 130, "url": "https://clips.twitch.tv/B"}]), encoding="utf-8")
+
+    class Creator:
+        def from_vod(self, vod_id, end, duration, title=""):
+            return {"id": f"N{int(end)}", "edit_url": "e"}
+
+    hs = [Highlight(start=100, end=130, peak=110, score=9), Highlight(start=200, end=230, peak=210, score=5),
+          Highlight(start=300, end=330, peak=310, score=4)]
+    made = create_clips(Creator(), "v1", hs, limit=2, registry=reg)
+    assert len(made) == 2 and all(h.twitch_clip for h in hs)
+
+
+def test_vod_command_checks_vod_owner_not_channel_flag(tmp_path, monkeypatch):
+    from twitch_shorts import pipeline, twitch_api
+
+    seen = {}
+
+    class FakeHelix:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_video(self, vid):
+            return VideoInfo(vid, "7", "someone_else", "S", "t", datetime(2026, 10, 8, tzinfo=timezone.utc), 600, "u")
+
+        def get_clips_for_video(self, info):
+            return []
+
+    monkeypatch.setattr(twitch_api, "HelixClient", FakeHelix)
+    monkeypatch.setattr(pipeline, "process", lambda *a, **k: seen.update(k) or pipeline.RunResult([], tmp_path))
+    conf = tmp_path / "c.toml"
+    conf.write_text(f'work_dir = "{tmp_path / "work"}"\n[twitch]\nclient_id = "c"\nclient_secret = "s"\n')
+    (tmp_path / "work" / "vod_1234567").mkdir(parents=True)
+    (tmp_path / "work" / "vod_1234567" / "chat.jsonl").write_text("", encoding="utf-8")
+    cli.main(["-c", str(conf), "vod", "1234567", "--channel", "yuuki_ftw", "--twitch-clips", "--dry-run"])
+    assert seen["channel"] == "yuuki_ftw" and seen["clip_owner"] == "someone_else"
+
+
+def test_local_has_no_twitch_clips_flag():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["local", "a.mp4", "--twitch-clips"])
+
+
+def test_config_hashtags_are_normalized():
+    from twitch_shorts.pipeline import _fill_post_text
+
+    cfg = Config()
+    cfg.publish.hashtags = ["shorts", "Twitch切り抜き", " "]
+    h = Highlight(start=0, end=30, peak=10, score=1, hashtags=["#Shorts"])
+    _fill_post_text(cfg, h, "y")
+    assert h.hashtags == ["#Shorts", "#Twitch切り抜き"]
+
+
+def test_schedule_does_not_readd_removed_entries(tmp_path):
+    from twitch_shorts.schedule import add_to_schedule, load_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    old = Highlight(start=0, end=30, peak=5, score=1, title="old", output_path="/x/old.mp4")
+    new = Highlight(start=50, end=80, peak=60, score=2, title="new", output_path="/x/new.mp4")
+    add_to_schedule(cfg, [new], update_only=[old])
+    assert [e["title"] for e in load_schedule(cfg)] == ["new"]

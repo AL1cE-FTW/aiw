@@ -113,6 +113,7 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         return found
 
     done: list[Highlight] = []
+    interrupted = False
     next_run = start_time + cfg.watch.rolling_minutes * 60
     try:
         while proc.poll() is None:
@@ -123,8 +124,9 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
                 done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done,
                              elapsed - LIVE_TAIL_MARGIN, clip_vod(), dry_run)
     except KeyboardInterrupt:
-        log.info("中断されました。録画を止めて、ここまでの分を処理します")
+        log.info("中断されました。録画を止めて、ここまでの分を処理してから終了します")
         proc.terminate()
+        interrupted = True
     finally:
         try:
             proc.wait(timeout=30)
@@ -142,6 +144,9 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
     done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod(force=True),
                  dry_run)
+    if interrupted:
+        # Ctrl+C は「止める」意味なので、配信が続いていても次の録画は始めずに終了する
+        raise KeyboardInterrupt
     return done
 
 

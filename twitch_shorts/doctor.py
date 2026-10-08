@@ -67,20 +67,21 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
     token = load_token(cfg.work_dir)
     if token:
         login = token.get("login", "?")
-        if not can_create_clips(token):
+        has_scope, for_channel = can_create_clips(token), can_create_clips(token, channel)
+        if not has_scope:
             detail = "クリップ作成の許可がありません。twitch-shorts login をやり直してください"
-        elif not can_create_clips(token, channel):
+        elif not for_channel:
             detail = f"{login} でログイン中ですが、{channel} のクリップは配信者本人のアカウントでしか作れません"
         else:
             detail = f"{login} でログイン済み"
-        checks.append(Check("Twitch ログイン (クリップ作成)", can_create_clips(token, channel), detail, required=False))
+        checks.append(Check("Twitch ログイン (クリップ作成)", for_channel, detail, required=False))
     else:
         checks.append(Check("Twitch ログイン (クリップ作成)", False,
                             "未ログイン。Twitch の公式クリップも作るなら twitch-shorts login", required=False))
 
-    checks.append(Check("字幕 (faster-whisper)", _has_module("faster_whisper"),
-                        "使える" if _has_module("faster_whisper") else "任意: pip install 'twitch-shorts[transcribe]'",
-                        required=False))
+    whisper = _has_module("faster_whisper")
+    checks.append(Check("字幕 (faster-whisper)", whisper,
+                        "使える" if whisper else "任意: pip install 'twitch-shorts[transcribe]'", required=False))
     llm = _has_module("anthropic") and bool(os.environ.get("ANTHROPIC_API_KEY"))
     checks.append(Check("AI タイトル・引きの言葉 (Claude)", llm,
                         "使える" if llm else "任意: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY",
