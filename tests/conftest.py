@@ -27,9 +27,9 @@ class FakeSession:
         self.calls.append(("GET", url, params, headers))
         return self.handler("GET", url, params, None)
 
-    def post(self, url, data=None, headers=None, timeout=None):
-        self.calls.append(("POST", url, data, headers))
-        return self.handler("POST", url, None, data)
+    def post(self, url, data=None, headers=None, timeout=None, params=None):
+        self.calls.append(("POST", url, data if params is None else params, headers))
+        return self.handler("POST", url, params, data)
 
 
 @pytest.fixture

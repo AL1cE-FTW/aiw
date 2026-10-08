@@ -104,11 +104,14 @@ def process(
     dry_run: bool = False,
     llm_client=None,
     viewers: list[ViewerSample] | None = None,
+    clip_vod: tuple[str, float] | None = None,
 ) -> RunResult:
     """ハイライトを検出し、ショート動画を ``run_dir`` に書き出す。
 
     exclude:          既に書き出したハイライト (ライブの逐次処理で重複させないため)
     available_until:  これより後ろにかかる区間は採用しない (録画中のファイル用)
+    clip_vod:         (VOD の ID, ハイライトの時刻を VOD 上の時刻にするために足す秒数)。
+                      clips.enabled のとき、この VOD から Twitch の公式クリップを作る
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +176,9 @@ def process(
     for i, h in enumerate(selected, start=start_index):
         if not h.title:
             h.title = default_title(cfg, h, i, channel)
+        _fill_post_text(cfg, h, channel)
+        if clip_vod:
+            h.vod_url = vod_timestamp_url(clip_vod[0], h.start + clip_vod[1])
         if dry_run:
             continue
         video, offset = source.video_for(h.start, h.end)
@@ -182,7 +188,16 @@ def process(
                          max_total=cfg.detect.max_duration)
         h.output_path = str(out)
 
+    if cfg.clips.enabled and clip_vod and selected and not dry_run:
+        _make_twitch_clips(cfg, selected, clip_vod, already=sum(1 for e in exclude if e.twitch_clip))
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
+    try:
+        from .review import write_review_page
+
+        page = write_review_page(run_dir, selected + exclude, score, duration, channel, stream_title)
+        log.info("確認ページ: %s", page)
+    except OSError as e:
+        log.warning("確認ページを作れませんでした: %s", e)
     if cfg.publish.enabled and not dry_run:
         from .schedule import add_to_schedule
 
@@ -192,6 +207,42 @@ def process(
         except (ValueError, KeyError, OSError) as e:  # 設定ミスで書き出し済みの結果を失わないように
             log.warning("投稿予定表に追加できませんでした ([publish] の設定を確認してください): %s", e)
     return RunResult(selected, run_dir, score)
+
+
+def _fill_post_text(cfg: Config, h: Highlight, channel: str) -> None:
+    """投稿用の説明文・ハッシュタグを補う (AI が付けていればそれを優先)。"""
+    if not h.description:
+        h.description = cfg.publish.description_template.format(channel=channel or "配信").strip()
+    tags = list(h.hashtags)
+    for t in cfg.publish.hashtags:
+        if t.lower() not in {x.lower() for x in tags}:
+            tags.append(t)
+    h.hashtags = tags
+
+
+def vod_timestamp_url(video_id: str, seconds: float) -> str:
+    """VOD の指定位置を開く URL (Twitch の ?t=1h2m3s 形式)。"""
+    t = max(0, int(seconds))
+    return f"https://www.twitch.tv/videos/{video_id}?t={t // 3600}h{t % 3600 // 60}m{t % 60}s"
+
+
+def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple[str, float], already: int) -> None:
+    from .twitch_auth import TwitchAuthError, UserToken
+    from .twitch_clips import ClipCreator, create_clips
+
+    limit = cfg.clips.max_per_stream - already
+    if limit <= 0:
+        return
+    try:
+        token = UserToken(cfg.twitch.client_id, cfg.twitch.client_secret, cfg.work_dir)
+    except TwitchAuthError as e:
+        log.warning("Twitch クリップは作りません: %s", e)
+        return
+    vod_id, shift = clip_vod
+    try:
+        create_clips(ClipCreator(cfg.twitch.client_id, token), vod_id, highlights, shift, limit)
+    except TwitchAuthError as e:  # トークン更新の失敗など。ショート自体は作れているので続ける
+        log.warning("Twitch クリップを作れませんでした: %s", e)
 
 
 def _hms(t: float, sep: str = "") -> str:

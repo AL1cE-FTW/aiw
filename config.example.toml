@@ -37,7 +37,7 @@ layout = "blur"         # blur / crop / facecam
 facecam = [0.75, 0.70, 0.25, 0.30]
 title = true
 subtitles = true        # 文字起こし (transcribe.enabled) が有効なときに字幕を焼き込む
-font = "Noto Sans CJK JP"
+# font = "Yu Gothic"     # 省略時は OS に合わせて自動 (Windows: Yu Gothic / Mac: Hiragino Sans / その他: Noto Sans CJK JP)
 title_template = "{channel} 切り抜き #{index}"   # 使える変数: channel, index, date, top_chat
 # --- ショートの型 (参考: タルレミ・エラ「OW動画投稿講座」) ---
 hook_seconds = 2.0        # 盛り上がりの瞬間を冒頭に先見せする秒数 (0 で無効)
@@ -68,3 +68,10 @@ enabled = true
 post_time = "19:00"
 posts_per_day = 1         # 解説系以外は 1 日 1 本までが推奨
 timezone = "Asia/Tokyo"
+hashtags = ["#shorts", "#Twitch切り抜き"]   # 投稿用ハッシュタグ (AI が付けたものに足す)
+description_template = "{channel} の Twitch 配信から切り抜きました。"
+
+[clips]
+# 検出した場面を Twitch の公式クリップとしても作る (先に twitch-shorts login が必要。auto では自動で有効)
+enabled = false
+max_per_stream = 5

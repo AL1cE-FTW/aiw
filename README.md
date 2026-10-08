@@ -1,28 +1,41 @@
 # twitch-shorts
 
 Twitch の配信から**盛り上がった場面を自動で見つけて**、YouTube Shorts / TikTok 向けの
-**縦型ショート動画 (1080×1920, 15〜59 秒)** を作るツールです。
+**縦型ショート動画 (1080×1920, 15〜59 秒)** と **Twitch の公式クリップ** を作るツールです。
+
+> **はじめての方は [使い方ガイド (docs/GUIDE.md)](docs/GUIDE.md) をご覧ください。**
+> インストールから、PC で起動しておくだけの全自動化までを順番に説明しています。
+
+```bash
+twitch-shorts doctor yuuki_ftw   # 準備ができているか確認
+twitch-shorts login              # (任意) Twitch クリップも自動で作る場合
+twitch-shorts auto yuuki_ftw     # 起動しておくだけで、配信ごとに自動でショートとクリップを作る
+```
 
 ```
 配信/VOD ─┬─ チャット (流速・「草」「KEKW」「クリップ」等のワード)
           ├─ 音声 (叫び・笑い声などの音量ピーク)
           ├─ 視聴者が作った既存クリップ (Twitch API)
-          └─ 同時視聴者数の増加 (watch モードで記録)
+          └─ 同時視聴者数の増加 (watch / auto モードで記録)
                  │
                  ▼  各シグナルを「平常時からのずれ」に正規化して合成 → ピーク検出
           ハイライト候補
                  │  (任意) faster-whisper で文字起こし → 文の切れ目に区間を合わせる
-                 │  (任意) Claude で「ショートとして面白いか」を評価・タイトル生成
+                 │  (任意) Claude で評価・タイトル・引きの言葉・カテゴリ・ハッシュタグ
                  ▼
-          ffmpeg で 9:16 に変換 + タイトル/字幕焼き込み + 音量正規化 (-14 LUFS)
+          ffmpeg で 9:16 に変換 + 冒頭の先見せ + テロップ焼き込み + 音量正規化 (-14 LUFS)
                  ▼
-          output/<チャンネル>_<VOD ID>/short_01_HHMMSS.mp4 … + highlights.json
+          output/<チャンネル>/<日時>/short_01_HHMMSS.mp4 … + index.html (確認ページ)
+          + Twitch 公式クリップ (ログイン時) + 投稿予定表 (毎日 19:00 に 1 本)
 ```
 
 ## できること
 
 | コマンド | 用途 |
 | --- | --- |
+| `twitch-shorts auto yuuki_ftw` | **【おすすめ】全自動**。配信を検知して録画し、配信後にショートと Twitch クリップを作って次の配信を待つ |
+| `twitch-shorts login` | 配信者アカウントで Twitch にログイン (公式クリップの自動作成用) |
+| `twitch-shorts doctor [チャンネル]` | 必要なものが揃っているか確認 |
 | `twitch-shorts watch yuuki_ftw` | **配信を監視**。始まったら自動で録画＋チャット記録し、終わったらショートを作る (常駐) |
 | `twitch-shorts latest yuuki_ftw` | **最新アーカイブを処理**。処理済み VOD はスキップするので cron / GitHub Actions 向け |
 | `twitch-shorts vod <URL or ID>` | 指定した VOD を処理 |
@@ -189,6 +202,16 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_YYYYMMDD/config.tuned.
 
 `output/.../highlights.json` に各ハイライトのスコア内訳 (chat / keywords / audio / clips) と
 チャット抜粋が出るので、調整の参考にしてください。
+
+## 確認ページと Twitch クリップ
+
+- 実行ごとに `index.html` (確認ページ) を作ります。盛り上がりスコアのグラフ、カテゴリ (面白い / スーパープレイ /
+  ほっこり / ネタ・名場面) とスコアでの絞り込み、各ショートのプレビュー、タイトル・説明文・ハッシュタグのコピー、
+  Twitch クリップと VOD の該当箇所へのリンクがあります ([KumoMoments](https://kumotools.com/kumomoments) の
+  タイムライン表示とカテゴリ分けを参考にしています)。
+- `twitch-shorts login` しておくと、検出した場面を Twitch の **Create Clip From VOD** API (オープンベータ) で
+  公式クリップとしても作ります (`auto` では自動で有効。`vod` / `latest` は `--twitch-clips`)。
+  配信中の録画とその配信の VOD は、録画開始の遅れを補正して位置を合わせます。
 
 ## 仕組みと注意点
 

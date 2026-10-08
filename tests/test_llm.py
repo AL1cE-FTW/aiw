@@ -60,3 +60,15 @@ def test_refusal_keeps_signal_order():
 def test_invalid_json_keeps_signal_order():
     cands = _cands()
     assert rerank_with_claude(cands, LLMConfig(), "c", "", 15, 59, client=FakeClient("not json")) == cands
+
+
+def test_rerank_sets_category_description_and_hashtags():
+    text = json.dumps({"candidates": [
+        {"id": 0, "score": 8, "title": "神エイム", "hook": "これ見て", "category": "スーパープレイ",
+         "description": "1v3 を制した瞬間。", "hashtags": ["#APEX", "クラッチ"], "reason": "", "start": 0, "end": 30},
+    ]}, ensure_ascii=False)
+    client = FakeClient(text)
+    [h, _] = rerank_with_claude(_cands(), LLMConfig(), "yuuki_ftw", "", 15, 59, client=client)
+    assert (h.category, h.description, h.hashtags) == ("スーパープレイ", "1v3 を制した瞬間。", ["#APEX", "#クラッチ"])
+    item = client.kwargs["output_config"]["format"]["schema"]["properties"]["candidates"]["items"]
+    assert item["properties"]["category"]["enum"][0] == "面白い"

@@ -1,0 +1,14 @@
+# systemd ユーザーサービス (Linux)。使い方は docs/GUIDE.md の「PC 起動時に自動で動かす」を参照。
+# WorkingDirectory と ExecStart のパスを、このリポジトリの場所に書き換えてください。
+[Unit]
+Description=twitch-shorts auto mode
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/aiw
+ExecStart=%h/aiw/.venv/bin/twitch-shorts auto yuuki_ftw
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

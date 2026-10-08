@@ -68,6 +68,10 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
             "publish_at": slot.isoformat(),
             "title": h.title,
             "hook": h.hook,
+            "category": h.category,
+            "description": h.description,
+            "hashtags": " ".join(h.hashtags),
+            "twitch_clip": h.twitch_clip,
             "channel": channel,
             "score": h.score,
             "duration": round(h.video_duration or h.duration, 1),
@@ -82,7 +86,8 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:  # Excel でも文字化けしないよう BOM 付き
-        w = csv.DictWriter(f, fieldnames=["publish_at", "title", "hook", "channel", "score", "duration", "path"],
+        w = csv.DictWriter(f, fieldnames=["publish_at", "title", "hook", "category", "description", "hashtags",
+                                          "channel", "score", "duration", "path", "twitch_clip"],
                            extrasaction="ignore")
         w.writeheader()
         w.writerows(entries)
