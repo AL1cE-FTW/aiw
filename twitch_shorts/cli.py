@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, load_config
+from .fileutil import write_json_atomic
 
 log = logging.getLogger("twitch_shorts")
 
@@ -92,7 +93,10 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
     src = VodSource(url, work, quality=args.quality, full_download=args.full_download)
     result = process(cfg, src, chat, Path(cfg.output_dir) / f"{channel or 'vod'}_{video_id}",
                      duration=duration, clips=clips, channel=channel, stream_title=title, dry_run=args.dry_run,
-                     clip_vod=(video_id, 0.0), clip_owner=owner)
+                     clip_vod=(video_id, 0.0),
+                     # API で持ち主を確認できないときは指定されたチャンネルを使う
+                     # (違っていれば Twitch 側が拒否し、1 回で作成をやめる)
+                     clip_owner=owner or channel)
     _print_result(result.highlights)
     return 0
 
@@ -117,7 +121,7 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         cmd_vod(cfg, args)
         if not args.dry_run:
             done.add(v.id)
-            state_path.write_text(json.dumps(sorted(done)))
+            write_json_atomic(state_path, sorted(done))
     return 0
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import time
 from datetime import datetime
 from pathlib import Path
@@ -140,6 +141,8 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         log.warning("録画プロセスの出力: %s", proc.stderr.read().decode(errors="replace")[-500:])
     if not video_path.exists() or video_path.stat().st_size == 0:
         log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
+        if interrupted:
+            raise KeyboardInterrupt
         return done
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
     done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod(force=True),
@@ -204,7 +207,39 @@ def _run(cfg: Config, channel: str, video: Path, chat_path: Path, viewers_path: 
     return result.highlights
 
 
+def _stop_on_terminate() -> None:
+    """サービスの停止や PC のシャットダウン (SIGTERM / Windows の Ctrl+Break) を Ctrl+C と同じに扱う。
+
+    そうしないと、録画途中の分を処理せずにすぐ終了してしまう。
+    """
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+
+    for name in ("SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):  # メインスレッド以外など
+                pass
+
+
+def process_leftovers(cfg: Config, channel: str, dry_run: bool = False) -> None:
+    """前回、処理する前に止まってしまった録画 (停電・強制終了など) を処理する。"""
+    base = Path(cfg.work_dir) / channel
+    for session_dir in sorted(base.glob("*/")) if base.exists() else []:
+        video = session_dir / "stream.ts"
+        run_dir = Path(cfg.output_dir) / channel / session_dir.name
+        if not video.exists() or video.stat().st_size == 0 or (run_dir / "highlights.json").exists():
+            continue
+        log.info("前回処理されなかった録画を処理します: %s", video)
+        _run(cfg, channel, video, session_dir / "chat.jsonl", session_dir / "viewers.jsonl", run_dir, [], None,
+             None, dry_run)
+
+
 def watch(cfg: Config, channel: str, once: bool = False, dry_run: bool = False) -> None:
+    _stop_on_terminate()
+    process_leftovers(cfg, channel, dry_run)
     checker = LiveChecker(cfg)
     while True:
         wait_until_live(cfg, channel, checker)

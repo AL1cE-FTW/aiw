@@ -9,6 +9,8 @@ WorkingDirectory=%h/aiw
 ExecStart=%h/aiw/.venv/bin/twitch-shorts auto yuuki_ftw
 Restart=on-failure
 RestartSec=60
+# 停止時は録画済みの分を処理してから終了するので、時間に余裕を持たせる
+TimeoutStopSec=1h
 
 [Install]
 WantedBy=default.target

@@ -27,7 +27,11 @@ def _has_module(name: str) -> bool:
 def _japanese_font() -> tuple[bool | None, str]:
     if not shutil.which("fc-list"):
         return None, "確認できません (fc-list がありません)。字幕が □ になる場合は日本語フォントを入れてください"
-    out = subprocess.run(["fc-list", ":lang=ja", "family"], capture_output=True, text=True).stdout.strip()
+    try:
+        out = subprocess.run(["fc-list", ":lang=ja", "family"], capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+    except subprocess.TimeoutExpired:
+        return None, "確認できません (フォント一覧の取得に時間がかかっています)"
     if out:
         return True, out.splitlines()[0].split(",")[0].replace("\\", "")
     return False, "日本語フォントが見つかりません (例: Noto Sans CJK JP を入れる)"

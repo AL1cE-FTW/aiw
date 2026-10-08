@@ -43,13 +43,12 @@ class ClipCreator:
         self.session = session or requests.Session()
 
     def from_vod(self, vod_id: str, end_offset: float, duration: float, title: str = "") -> dict:
-        duration = round(min(MAX_CLIP, max(MIN_CLIP, duration)), 1)
+        end_offset, duration = normalize_window(end_offset, duration)
         params = {
             "broadcaster_id": self.token.user_id,
             "editor_id": self.token.user_id,
             "vod_id": vod_id,
-            # vod_offset は整数で、duration 以上である必要がある
-            "vod_offset": max(math.ceil(end_offset), math.ceil(duration)),
+            "vod_offset": end_offset,
             "duration": duration,
         }
         if title:
@@ -82,7 +81,13 @@ class ClipCreator:
         raise ClipError("クリップを作成できませんでした (再試行の上限)")
 
 
-def clip_window(h: Highlight, shift: float = 0.0) -> tuple[float, float]:
+def normalize_window(end: float, duration: float) -> tuple[int, float]:
+    """Twitch の制約に合わせる: 長さは 5〜60 秒 (0.1 秒単位)、終わり位置は整数秒で長さ以上。"""
+    duration = round(min(MAX_CLIP, max(MIN_CLIP, duration)), 1)
+    return max(math.ceil(end), math.ceil(duration)), duration
+
+
+def clip_window(h: Highlight, shift: float = 0.0) -> tuple[int, float]:
     """ハイライトを Twitch のクリップの制約 (5〜60 秒、終わり位置指定) に合わせる。
 
     shift: ハイライトの時刻に足すと VOD 上の時刻になる秒数 (録画開始が配信開始より遅れた分)。
@@ -94,9 +99,7 @@ def clip_window(h: Highlight, shift: float = 0.0) -> tuple[float, float]:
         # 長すぎる場合は盛り上がりのピークを含むように後ろ寄せで 60 秒にする
         end = min(end, max(h.peak + shift + 15, start + MAX_CLIP))
         duration = MAX_CLIP
-    duration = max(MIN_CLIP, duration)
-    end = max(end, duration)  # vod_offset >= duration が必要
-    return end, duration
+    return normalize_window(end, duration)
 
 
 def _load_registry(path: Path | None) -> list[dict]:
@@ -107,7 +110,17 @@ def _load_registry(path: Path | None) -> list[dict]:
     except (OSError, json.JSONDecodeError):
         log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
         return []
-    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    valid = []
+    for r in data:
+        try:
+            if isinstance(r, dict) and r.get("vod_id") and r.get("url"):
+                float(r.get("end"))
+                valid.append(r)
+        except (TypeError, ValueError):
+            continue  # 壊れた行は無視する
+    return valid
 
 
 def clips_made_for(registry: Path | None, vod_id: str) -> int:

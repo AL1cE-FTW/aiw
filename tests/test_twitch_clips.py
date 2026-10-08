@@ -110,7 +110,7 @@ def test_clip_forbidden_stops(tmp_path):
 
 def test_clip_window_fits_twitch_limits():
     assert clip_window(Highlight(start=100, end=130, peak=120, score=1)) == (130, 30)
-    assert clip_window(Highlight(start=100, end=130, peak=120, score=1), shift=12.5) == (142.5, 30)
+    assert clip_window(Highlight(start=100, end=130, peak=120, score=1), shift=12.5) == (143, 30)  # 整数秒に切り上げ
     end, dur = clip_window(Highlight(start=0, end=90, peak=70, score=1))
     assert dur == 60 and end - dur <= 70 <= end  # 60 秒に縮めてもピークを含む
     assert clip_window(Highlight(start=0, end=2, peak=1, score=1)) == (5, 5)
@@ -499,8 +499,8 @@ def test_registry_with_wrong_shape_is_ignored(tmp_path):
     p = tmp_path / "twitch_clips.json"
     p.write_text("{}", encoding="utf-8")
     assert _load_registry(p) == [] and clips_made_for(p, "v1") == 0
-    p.write_text('[{"vod_id": "v1"}, "junk", 3]', encoding="utf-8")
-    assert clips_made_for(p, "v1") == 1
+    p.write_text('[{"vod_id": "v1", "end": 30, "url": "u"}, {"vod_id": "v1"}, "junk", 3]', encoding="utf-8")
+    assert clips_made_for(p, "v1") == 1  # url や end の無い行は数えない
 
 
 def test_permission_error_is_typed(tmp_path):
@@ -671,3 +671,144 @@ def test_schedule_does_not_readd_removed_entries(tmp_path):
     new = Highlight(start=50, end=80, peak=60, score=2, title="new", output_path="/x/new.mp4")
     add_to_schedule(cfg, [new], update_only=[old])
     assert [e["title"] for e in load_schedule(cfg)] == ["new"]
+
+
+
+# --- 5 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_ctrl_c_before_any_data_still_exits(tmp_path, monkeypatch):
+    class Proc:
+        returncode = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    class FakeChat:
+        def __init__(self, *a):
+            self.count = 0
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watcher, "start_live_recording", lambda *a: Proc())
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher.time, "sleep", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch")
+
+
+def test_sigterm_is_treated_like_ctrl_c():
+    import signal
+
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        watcher._stop_on_terminate()
+        with pytest.raises(KeyboardInterrupt):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
+def test_leftover_recordings_are_processed_once(make_stream, tmp_path):
+    import shutil
+
+    video, chat_path = make_stream(duration=100, events=(50,))
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.render.width, cfg.render.height = 360, 640
+    session = tmp_path / "work" / "yuuki_ftw" / "20261008_200000"
+    session.mkdir(parents=True)
+    import subprocess
+
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts",
+                    str(session / "stream.ts")], check=True)
+    shutil.copy(chat_path, session / "chat.jsonl")
+    watcher.process_leftovers(cfg, "yuuki_ftw")
+    report = tmp_path / "out" / "yuuki_ftw" / "20261008_200000" / "highlights.json"
+    assert report.exists()
+    mtime = report.stat().st_mtime
+    watcher.process_leftovers(cfg, "yuuki_ftw")  # 処理済みは再処理しない
+    assert report.stat().st_mtime == mtime
+
+
+def test_refresh_uses_token_updated_by_another_process(tmp_path):
+    _token(tmp_path, expires_at=time.time() - 1)
+    session = FakeSession(lambda *a: pytest.fail("別プロセスの更新済みトークンがあるのに更新した"))
+    t = UserToken("cid", "", tmp_path, session=session)
+    save_token(tmp_path, {**t.token, "access_token": "fresh", "refresh_token": "rt2",
+                          "expires_at": time.time() + 9999})
+    assert t.access_token() == "fresh"
+
+
+def test_registry_skips_malformed_entries(tmp_path):
+    from twitch_shorts.twitch_clips import _load_registry, create_clips
+
+    reg = tmp_path / "twitch_clips.json"
+    reg.write_text(json.dumps([{"vod_id": "v1", "end": None, "url": "x"}, {"vod_id": "v1", "end": 30},
+                               {"vod_id": "v1", "end": "30", "url": "https://clips.twitch.tv/OK"}]), encoding="utf-8")
+    assert [r["url"] for r in _load_registry(reg)] == ["https://clips.twitch.tv/OK"]
+    h = Highlight(start=0, end=30, peak=10, score=1)
+    create_clips(None, "v1", [h], registry=reg)
+    assert h.twitch_clip == "https://clips.twitch.tv/OK"
+
+
+def test_window_normalization_is_shared():
+    from twitch_shorts.twitch_clips import normalize_window
+
+    assert normalize_window(125.4, 80) == (126, 60.0)
+    assert normalize_window(5.3, 5.3) == (6, 5.3)
+    assert clip_window(Highlight(start=0, end=2, peak=1, score=1)) == normalize_window(5, 5)
+
+
+def test_vod_owner_falls_back_to_channel_without_api(tmp_path, monkeypatch):
+    from twitch_shorts import pipeline
+
+    seen = {}
+    monkeypatch.setattr(pipeline, "process", lambda *a, **k: seen.update(k) or pipeline.RunResult([], tmp_path))
+    conf = tmp_path / "c.toml"
+    conf.write_text(f'work_dir = "{tmp_path / "work"}"\n')
+    (tmp_path / "work" / "vod_1234567").mkdir(parents=True)
+    (tmp_path / "work" / "vod_1234567" / "chat.jsonl").write_text("", encoding="utf-8")
+    cli.main(["-c", str(conf), "vod", "1234567", "--channel", "yuuki_ftw", "--twitch-clips", "--dry-run"])
+    assert seen["clip_owner"] == "yuuki_ftw"
+
+
+def test_recorder_keeps_ads_for_aligned_timeline(monkeypatch, tmp_path):
+    from twitch_shorts import download
+
+    captured = {}
+
+    class P:
+        def __init__(self, cmd, **k):
+            captured["cmd"] = cmd
+
+    monkeypatch.setattr(download.shutil, "which", lambda n: "/usr/bin/streamlink")
+    monkeypatch.setattr(download.subprocess, "Popen", P)
+    download.start_live_recording("yuuki_ftw", tmp_path / "s.ts", "streamlink")
+    assert "--twitch-disable-ads" not in captured["cmd"]
+
+
+def test_doctor_font_check_times_out(monkeypatch):
+    import subprocess
+
+    from twitch_shorts import doctor
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def slow(*a, **k):
+        raise subprocess.TimeoutExpired(a[0], k.get("timeout"))
+
+    monkeypatch.setattr(doctor.subprocess, "run", slow)
+    assert doctor._japanese_font()[0] is None

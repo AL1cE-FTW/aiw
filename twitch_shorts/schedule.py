@@ -14,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Config
+from .fileutil import write_json_atomic
 from .models import Highlight
 
 SCHEDULE_JSON = "schedule.json"
@@ -92,7 +93,7 @@ def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
     entries.sort(key=lambda e: e["publish_at"])
     json_path, csv_path = _paths(cfg)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(json_path, entries)  # 逐次処理のたびに書き換えるので、途中で止まっても壊れないように
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:  # Excel でも文字化けしないよう BOM 付き
         w = csv.DictWriter(f, fieldnames=["publish_at", "title", "hook", "category", "description", "hashtags",
                                           "channel", "score", "duration", "path", "twitch_clip"],

@@ -145,8 +145,18 @@ class UserToken:
     def login(self) -> str:
         return self.token.get("login", "")
 
+    def _expired(self) -> bool:
+        return time.time() > float(self.token.get("expires_at", 0)) - 120
+
     def access_token(self, force_refresh: bool = False) -> str:
-        if force_refresh or time.time() > float(self.token.get("expires_at", 0)) - 120:
+        if force_refresh or self._expired():
+            # 別のプロセス (auto と latest など) が先に更新していれば、そのトークンを使う
+            # (リフレッシュトークンは一度使うと無効になることがあるため)
+            on_disk = load_token(self.work_dir)
+            if on_disk and on_disk.get("access_token") != self.token.get("access_token"):
+                self.token = on_disk
+                if not self._expired():
+                    return self.token["access_token"]
             self._refresh()
         return self.token["access_token"]
 
