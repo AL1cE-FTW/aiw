@@ -324,7 +324,9 @@ def test_dry_run_watch_session_creates_no_clips(make_stream, tmp_path, monkeypat
     import shutil
     import subprocess
 
-    from twitch_shorts import twitch_clips
+    from twitch_shorts import download, twitch_clips
+
+    monkeypatch.setattr(download, "download_audio", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
 
     video, chat_path = make_stream(duration=100, events=(50,))
     monkeypatch.setattr(watcher, "start_live_recording", lambda c, out, r, q: subprocess.Popen(
@@ -433,9 +435,13 @@ def test_token_file_is_private(tmp_path):
 
 # --- 3 回目のレビュー指摘の回帰テスト ---------------------------------------
 
-def test_final_pass_retries_vod_lookup_and_applies_latency(make_stream, tmp_path, monkeypatch):
+def test_final_pass_uses_vod_timeline(make_stream, tmp_path, monkeypatch):
     import shutil
     import subprocess
+
+    from twitch_shorts import download
+
+    monkeypatch.setattr(download, "download_audio", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
 
     video, chat_path = make_stream(duration=100, events=(50,))
     monkeypatch.setattr(watcher, "start_live_recording", lambda c, out, r, q: subprocess.Popen(
@@ -473,11 +479,12 @@ def test_final_pass_retries_vod_lookup_and_applies_latency(make_stream, tmp_path
     cfg.watch.rolling_minutes = 0
     cfg.watch.stream_latency = 8.0
     done = watcher.record_and_process(cfg, "yuuki_ftw", helix=FakeHelix(), dry_run=True)
-    assert lookups, "最後の処理では待ち時間に関係なく VOD を探す"
+    assert lookups, "配信後の最終処理で VOD を探す"
     h = done[0]
-    # 録画の位置 + (録画開始 - 遅れ - 配信開始) = VOD の位置
-    expected = int(h.start + 300 - 8)
-    assert h.vod_url.endswith(f"t={expected // 3600}h{expected % 3600 // 60}m{expected % 60}s")
+    # 最終処理は VOD の時刻で行う: 録画の 50 秒目の山 + (録画開始 - 遅れ - 配信開始 = 292 秒)
+    assert abs(h.peak - (50 + 300 - 8)) <= 5
+    t = int(h.start)
+    assert h.vod_url.endswith(f"t={t // 3600}h{t % 3600 // 60}m{t % 60}s")
 
 
 def test_clip_limit_counts_earlier_runs_on_same_vod(make_stream, tmp_path, monkeypatch):
@@ -716,10 +723,16 @@ def test_sigterm_is_treated_like_ctrl_c():
     old = signal.getsignal(signal.SIGTERM)
     try:
         watcher._stop_on_terminate()
+        handler = signal.getsignal(signal.SIGTERM)
         with pytest.raises(KeyboardInterrupt):
-            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            handler(signal.SIGTERM, None)  # 待機中・録画中はすぐ止める
+        watcher._STOP.clear()
+        with watcher._busy():
+            handler(signal.SIGTERM, None)  # 書き出し中は中断しない (終わったら止まる)
+        assert watcher._STOP.is_set()
     finally:
         signal.signal(signal.SIGTERM, old)
+        watcher._STOP.clear()
 
 
 def test_leftover_recordings_are_processed_once(make_stream, tmp_path):
@@ -785,7 +798,7 @@ def test_vod_owner_falls_back_to_channel_without_api(tmp_path, monkeypatch):
     assert seen["clip_owner"] == "yuuki_ftw"
 
 
-def test_recorder_keeps_ads_for_aligned_timeline(monkeypatch, tmp_path):
+def test_recorder_skips_ads(monkeypatch, tmp_path):
     from twitch_shorts import download
 
     captured = {}
@@ -797,7 +810,8 @@ def test_recorder_keeps_ads_for_aligned_timeline(monkeypatch, tmp_path):
     monkeypatch.setattr(download.shutil, "which", lambda n: "/usr/bin/streamlink")
     monkeypatch.setattr(download.subprocess, "Popen", P)
     download.start_live_recording("yuuki_ftw", tmp_path / "s.ts", "streamlink")
-    assert "--twitch-disable-ads" not in captured["cmd"]
+    # 広告の映像がショートにならないよう録画しない (配信後の最終処理は VOD から行うので位置はずれない)
+    assert "--twitch-disable-ads" in captured["cmd"]
 
 
 def test_doctor_font_check_times_out(monkeypatch):
@@ -812,3 +826,102 @@ def test_doctor_font_check_times_out(monkeypatch):
 
     monkeypatch.setattr(doctor.subprocess, "run", slow)
     assert doctor._japanese_font()[0] is None
+
+
+
+# --- 6 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def _session(tmp_path, make_stream, name="20261008_200000"):
+    import shutil
+    import subprocess
+
+    video, chat_path = make_stream(duration=100, events=(50,))
+    session = tmp_path / "work" / "yuuki_ftw" / name
+    session.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts",
+                    str(session / "stream.ts")], check=True)
+    shutil.copy(chat_path, session / "chat.jsonl")
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.render.width, cfg.render.height = 360, 640
+    return cfg, session
+
+
+def test_leftover_ignores_rolling_report_and_marks_processed(make_stream, tmp_path):
+    cfg, session = _session(tmp_path, make_stream)
+    run_dir = tmp_path / "out" / "yuuki_ftw" / session.name
+    run_dir.mkdir(parents=True)
+    (run_dir / "highlights.json").write_text("{}", encoding="utf-8")  # 配信中の途中経過だけある
+    watcher.process_leftovers(cfg, "yuuki_ftw")
+    assert (session / "processed").exists()
+    assert json.loads((run_dir / "highlights.json").read_text(encoding="utf-8"))["highlights"]
+
+
+def test_leftover_gives_up_after_two_attempts(tmp_path, monkeypatch):
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    session = tmp_path / "work" / "yuuki_ftw" / "broken"
+    session.mkdir(parents=True)
+    (session / "stream.ts").write_bytes(b"not a video")
+    runs = []
+    monkeypatch.setattr(watcher, "_run", lambda *a, **k: runs.append(1) or [])
+    monkeypatch.setattr(watcher, "_mark", lambda *a: None)  # 処理に失敗し続ける想定
+    for _ in range(4):
+        watcher.process_leftovers(cfg, "yuuki_ftw")
+    assert len(runs) == 2
+
+
+def test_final_pass_falls_back_to_recording_when_vod_fails(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(watcher, "find_stream_vod", lambda *a, **k: ("v1", 10.0))
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: None)  # VOD のダウンロードに失敗
+    out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session,
+                              tmp_path / "out" / "yuuki_ftw" / session.name, [], False)
+    assert out and out[0].output_path.endswith(".mp4")
+    assert (session / "processed").exists()
+
+
+def test_atomic_write_permissions_and_lock(tmp_path):
+    import os
+    import stat
+    import threading
+
+    from twitch_shorts.fileutil import file_lock, write_json_atomic
+
+    p = tmp_path / "secret.json"
+    (tmp_path / "secret.json.tmp").write_text("old", encoding="utf-8")  # 以前の残り
+    write_json_atomic(p, {"a": 1}, private=True)
+    if os.name == "posix":
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    write_json_atomic(tmp_path / "pub.json", [1])
+    assert json.loads((tmp_path / "pub.json").read_text()) == [1]
+
+    counter = tmp_path / "count.json"
+    write_json_atomic(counter, 0)
+
+    def bump():
+        for _ in range(20):
+            with file_lock(counter):
+                write_json_atomic(counter, json.loads(counter.read_text()) + 1)
+
+    ts = [threading.Thread(target=bump) for _ in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert json.loads(counter.read_text()) == 80
+
+
+def test_hashtag_normalization_handles_fullwidth():
+    from twitch_shorts.models import normalize_hashtag
+
+    assert [normalize_hashtag(t) for t in ["＃APEX", "#shorts", " clutch ", "#", ""]] == \
+        ["#APEX", "#shorts", "#clutch", "", ""]
+
+
+def test_auth_failure_during_batch_stops_with_login_hint(tmp_path, caplog):
+    from twitch_shorts.twitch_clips import create_clips
+
+    class Creator:
+        def from_vod(self, *a, **k):
+            raise TwitchAuthError("revoked")
+
+    hs = [Highlight(start=i * 100, end=i * 100 + 30, peak=i * 100 + 10, score=1) for i in range(3)]
+    assert create_clips(Creator(), "v1", hs) == []
+    assert "twitch-shorts login をやり直して" in caplog.text

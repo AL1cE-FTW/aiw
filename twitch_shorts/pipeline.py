@@ -15,7 +15,7 @@ import numpy as np
 from . import audio as audio_mod
 from .config import Config
 from .detector import detect_highlights, snap_to_transcript
-from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample
+from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample, normalize_hashtag
 from .render import render_highlight
 
 log = logging.getLogger(__name__)
@@ -240,12 +240,8 @@ def _fill_post_text(cfg: Config, h: Highlight, channel: str, index: int = 1) -> 
                                       _template_vars(h, index, channel or "配信"))
     tags: list[str] = []
     seen: set[str] = set()
-    for t in [*h.hashtags, *cfg.publish.hashtags]:
-        t = t.strip()
-        if not t:
-            continue
-        t = t if t.startswith("#") else f"#{t}"
-        if t.lower() not in seen:
+    for t in map(normalize_hashtag, [*h.hashtags, *cfg.publish.hashtags]):
+        if t and t.lower() not in seen:
             seen.add(t.lower())
             tags.append(t)
     h.hashtags = tags

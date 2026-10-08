@@ -96,10 +96,9 @@ def start_live_recording(channel: str, out_path: str | Path, recorder: str = "au
     out_path = str(out_path)
     use_streamlink = recorder == "streamlink" or (recorder == "auto" and shutil.which("streamlink"))
     if use_streamlink:
-        # 広告は飛ばさない: 広告は配信の映像と同じ時間だけ差し替わるので、そのまま録画すると
-        # 録画の時刻が配信 (VOD) の時刻とずれない。飛ばすとミッドロール広告の分だけ録画が短くなり、
-        # ショートの切り出し位置や Twitch クリップの位置がずれてしまう
-        cmd = ["streamlink", "--force", "-o", out_path, channel_url(channel), quality]
+        # 広告は録画しない (広告の映像がショートになると権利上の問題になる)。広告を飛ばした分だけ
+        # 録画は短くなるが、配信後の最終処理は広告の無い VOD から行うので位置はずれない
+        cmd = ["streamlink", "--twitch-disable-ads", "--force", "-o", out_path, channel_url(channel), quality]
     else:
         cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-part", "--hls-use-mpegts",
                "-f", quality, "-o", out_path, channel_url(channel)]

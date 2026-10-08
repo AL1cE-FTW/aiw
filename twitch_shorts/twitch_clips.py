@@ -18,9 +18,9 @@ from pathlib import Path
 
 import requests
 
-from .fileutil import write_json_atomic
+from .fileutil import file_lock, write_json_atomic
 from .models import Highlight
-from .twitch_auth import UserToken
+from .twitch_auth import TwitchAuthError, UserToken
 
 log = logging.getLogger(__name__)
 
@@ -173,13 +173,19 @@ def create_clips(creator: ClipCreator | None, vod_id: str, highlights: list[High
         except (requests.RequestException, ValueError, KeyError) as e:  # 通信エラー・想定外の応答
             log.warning("Twitch クリップを作れませんでした (%s): %s", h.title, e)
             continue
+        except TwitchAuthError as e:  # トークンの更新に失敗 (パスワード変更などで無効になった)
+            log.warning("Twitch クリップを作れませんでした。twitch-shorts login をやり直してください: %s", e)
+            break
         # 視聴者に共有できる公開 URL と、配信者用の編集ページを分けて持つ
         h.twitch_clip = public_clip_url(clip["id"]) if clip.get("id") else clip.get("edit_url", "")
         h.twitch_clip_edit = clip.get("edit_url", "")
         log.info("Twitch クリップを作成: %s  %s", h.title, h.twitch_clip)
         made.append(h)
-        known.append({"vod_id": vod_id, "end": round(end, 1), "duration": duration, "url": h.twitch_clip,
-                      "edit_url": h.twitch_clip_edit, "id": clip.get("id", ""), "title": h.title})
+        entry = {"vod_id": vod_id, "end": round(end, 1), "duration": duration, "url": h.twitch_clip,
+                 "edit_url": h.twitch_clip_edit, "id": clip.get("id", ""), "title": h.title}
+        known.append(entry)
         if registry:
-            write_json_atomic(registry, known)
+            # 別のプロセスが同時に書き足していても消さないよう、読み直してから追記する
+            with file_lock(registry):
+                write_json_atomic(registry, [*_load_registry(registry), entry])
     return made

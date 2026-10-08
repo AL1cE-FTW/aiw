@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Config
-from .fileutil import write_json_atomic
+from .fileutil import file_lock, write_json_atomic
 from .models import Highlight
 
 SCHEDULE_JSON = "schedule.json"
@@ -43,6 +43,14 @@ def _slot_times(cfg: Config, day: date, tz: ZoneInfo) -> list[datetime]:
 
 def add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str = "",
                     now: datetime | None = None, update_only: list[Highlight] | tuple = ()) -> list[dict]:
+    """書き出し済みのハイライトを空いている投稿枠に入れ、追加した予定を返す (別プロセスと同時でも安全)。"""
+    json_path, _ = _paths(cfg)
+    with file_lock(json_path):
+        return _add_to_schedule(cfg, highlights, channel, now, update_only)
+
+
+def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
+                     now: datetime | None, update_only: list[Highlight] | tuple) -> list[dict]:
     """書き出し済みのハイライトを空いている投稿枠に入れ、追加した予定を返す。
 
     update_only: 予定には追加せず、登録済みなら後から作れた Twitch クリップの URL だけ反映するもの。

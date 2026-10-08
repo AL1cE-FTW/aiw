@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, load_config
-from .fileutil import write_json_atomic
+from .fileutil import file_lock, write_json_atomic
 
 log = logging.getLogger("twitch_shorts")
 
@@ -120,8 +120,10 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         args.channel = args.channel.lower()
         cmd_vod(cfg, args)
         if not args.dry_run:
+            with file_lock(state_path):
+                latest = set(json.loads(state_path.read_text())) if state_path.exists() else set()
+                write_json_atomic(state_path, sorted(latest | done | {v.id}))
             done.add(v.id)
-            write_json_atomic(state_path, sorted(done))
     return 0
 
 

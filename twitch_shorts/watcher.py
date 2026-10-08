@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -19,8 +21,6 @@ log = logging.getLogger(__name__)
 
 # 録画中ファイルの末尾付近は書き込み途中なので、この秒数ぶん手前までを処理対象にする
 LIVE_TAIL_MARGIN = 45.0
-# 配信の VOD が見つからなかったときに探し直す間隔 (秒)
-VOD_RETRY_SECONDS = 600
 
 
 class LiveChecker:
@@ -79,40 +79,6 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         log.info("Twitch API の認証情報が無いため、同時視聴者数は記録しません")
     log.info("録画中: %s / チャット: %s", video_path, chat_path)
 
-    vod_state: dict = {"vod": None, "user_id": None, "next_try": 0.0, "warned": False,
-                       "started": stream_started}
-
-    def clip_vod(force: bool = False) -> tuple[str, float] | None:
-        """この配信の VOD を探す (クリップ作成と、場面へのリンク用)。
-
-        見つかるまでは 10 分おきに探し直し、見つからない旨の警告は 1 回だけ出す。
-        force: 待ち時間を無視して探す (配信終了後の最後の処理用)。
-        """
-        if helix is None or vod_state["vod"] is not None:
-            return vod_state["vod"]
-        if not force and time.time() < vod_state["next_try"]:
-            return None
-        vod_state["next_try"] = time.time() + VOD_RETRY_SECONDS
-        try:
-            if vod_state["started"] is None:
-                vod_state["started"] = _stream_started_at(helix, channel)
-            if vod_state["user_id"] is None:
-                vod_state["user_id"] = helix.get_user_id(channel)
-            # 録画は配信より少し遅れて届くので、その分だけ VOD 上では前の位置になる
-            found = find_stream_vod(helix, channel, start_time - cfg.watch.stream_latency,
-                                    vod_state["started"], vod_state["user_id"])
-        except Exception as e:
-            log.warning("この配信の VOD を確認できませんでした: %s", e)
-            return None
-        if not found:
-            if not vod_state["warned"]:
-                log.warning("この配信の VOD が見つかりません。Twitch クリップと VOD へのリンクは付きません "
-                            "(Twitch の設定で「過去の配信を保存」が有効か確認してください)")
-                vod_state["warned"] = True
-            return None
-        vod_state["vod"] = found
-        return found
-
     done: list[Highlight] = []
     interrupted = False
     next_run = start_time + cfg.watch.rolling_minutes * 60
@@ -122,8 +88,12 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             if cfg.watch.rolling_minutes > 0 and time.time() >= next_run and video_path.exists():
                 next_run = time.time() + cfg.watch.rolling_minutes * 60
                 elapsed = time.time() - start_time
-                done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done,
-                             elapsed - LIVE_TAIL_MARGIN, clip_vod(), dry_run)
+                # 配信中は録画から作る (Twitch クリップは位置が正確な配信後の VOD から作る)
+                with _busy():
+                    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done,
+                                 elapsed - LIVE_TAIL_MARGIN, None, dry_run)
+                if _STOP.is_set():
+                    raise KeyboardInterrupt
     except KeyboardInterrupt:
         log.info("中断されました。録画を止めて、ここまでの分を処理してから終了します")
         proc.terminate()
@@ -145,12 +115,66 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             raise KeyboardInterrupt
         return done
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
-    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir, done, None, clip_vod(force=True),
-                 dry_run)
-    if interrupted:
-        # Ctrl+C は「止める」意味なので、配信が続いていても次の録画は始めずに終了する
+    with _busy():
+        done = _final_pass(cfg, channel, helix, start_time, stream_started, session_dir, run_dir, done, dry_run)
+    if interrupted or _STOP.is_set():
+        # Ctrl+C / 停止の指示は「止める」意味なので、配信が続いていても次の録画は始めずに終了する
         raise KeyboardInterrupt
     return done
+
+
+def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_started: float | None,
+                session_dir: Path, run_dir: Path, done: list[Highlight], dry_run: bool) -> list[Highlight]:
+    """配信終了後の最終処理。
+
+    この配信の VOD が見つかれば VOD から作る: VOD には広告が入らず時刻も正確なので、ショートの切り出し位置と
+    Twitch クリップの位置が合う。見つからなければ (VOD を保存しない設定など) 録画から作る。
+    """
+    video, chat_path, viewers_path = session_dir / "stream.ts", session_dir / "chat.jsonl", session_dir / "viewers.jsonl"
+    vod = None
+    if helix is not None:
+        try:
+            started = stream_started if stream_started is not None else _stream_started_at(helix, channel)
+            # 録画は配信より少し遅れて届くので、その分だけ VOD 上では前の位置になる
+            vod = find_stream_vod(helix, channel, start_time - cfg.watch.stream_latency, started)
+        except Exception as e:
+            log.warning("この配信の VOD を確認できませんでした: %s", e)
+        if vod is None:
+            log.warning("この配信の VOD が見つからないため、録画から作ります (Twitch クリップは作りません。"
+                        "Twitch の設定で「過去の配信を保存」を有効にすると作れます)")
+    result = _run_from_vod(cfg, channel, vod, chat_path, viewers_path, run_dir, done, dry_run) if vod else None
+    if result is None:
+        result = done + _run(cfg, channel, video, chat_path, viewers_path, run_dir, done, None, None, dry_run)
+    _mark(session_dir, "processed")
+    return result
+
+
+def _run_from_vod(cfg: Config, channel: str, vod: tuple[str, float], chat_path: Path, viewers_path: Path,
+                  run_dir: Path, done: list[Highlight], dry_run: bool) -> list[Highlight] | None:
+    """録画の時刻で記録したチャット・視聴者数を VOD の時刻に直し、VOD から作る。失敗したら None。"""
+    from dataclasses import replace
+
+    from .download import vod_url
+    from .pipeline import VodSource
+
+    vod_id, shift = vod
+    chat = load_chat(chat_path) if chat_path.exists() and chat_path.stat().st_size else []
+    viewers = load_viewers(viewers_path) if viewers_path.exists() and viewers_path.stat().st_size else None
+    chat = [replace(m, offset=m.offset + shift) for m in chat]
+    viewers = [replace(v, offset=v.offset + shift) for v in viewers] if viewers else None
+    # 配信中に作った分は、VOD の時刻に直して重複しないようにする
+    earlier = [replace(h, start=h.start + shift, end=h.end + shift, peak=h.peak + shift) for h in done]
+    log.info("この配信の VOD (%s) から作ります", vod_id)
+    try:
+        result = process(cfg, VodSource(vod_url(vod_id), Path(cfg.work_dir) / f"vod_{vod_id}", cfg.watch.quality),
+                         chat, run_dir, channel=channel, exclude=earlier, viewers=viewers,
+                         clip_vod=(vod_id, 0.0), dry_run=dry_run)
+    except Exception as e:
+        log.warning("VOD から作れなかったため、録画から作ります: %s", e)
+        return None
+    for h in result.highlights:
+        log.info("作成: %s  %s", h.output_path, h.title)
+    return earlier + result.highlights
 
 
 def _stream_started_at(helix, channel: str) -> float | None:
@@ -207,12 +231,32 @@ def _run(cfg: Config, channel: str, video: Path, chat_path: Path, viewers_path: 
     return result.highlights
 
 
-def _stop_on_terminate() -> None:
-    """サービスの停止や PC のシャットダウン (SIGTERM / Windows の Ctrl+Break) を Ctrl+C と同じに扱う。
+# 停止の指示 (SIGTERM など) を受けたか。処理中に受けた場合は処理を終えてから止まる
+_STOP = threading.Event()
+_BUSY = threading.Event()
 
-    そうしないと、録画途中の分を処理せずにすぐ終了してしまう。
+
+@contextmanager
+def _busy():
+    """この間は停止の指示を受けても処理を中断しない (書き出し途中で止まると成果物が残らないため)。"""
+    _BUSY.set()
+    try:
+        yield
+    finally:
+        _BUSY.clear()
+
+
+def _stop_on_terminate() -> None:
+    """サービスの停止や PC のシャットダウン (SIGTERM / Windows の Ctrl+Break) を受けたら止まる。
+
+    録画中・待機中なら Ctrl+C と同じく、ここまでの録画を処理して終了する。
+    処理中なら、その処理が終わってから終了する。
     """
     def handler(signum, frame):
+        _STOP.set()
+        if _BUSY.is_set():
+            log.info("停止の指示を受けました。いまの処理が終わったら終了します")
+            return
         raise KeyboardInterrupt
 
     for name in ("SIGTERM", "SIGBREAK"):
@@ -224,22 +268,46 @@ def _stop_on_terminate() -> None:
                 pass
 
 
+MAX_LEFTOVER_ATTEMPTS = 2
+
+
+def _mark(session_dir: Path, name: str) -> None:
+    try:
+        (session_dir / name).write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def process_leftovers(cfg: Config, channel: str, dry_run: bool = False) -> None:
-    """前回、処理する前に止まってしまった録画 (停電・強制終了など) を処理する。"""
+    """前回、最後まで処理する前に止まってしまった録画 (停電・強制終了など) を処理する。
+
+    最終処理が終わった録画には "processed" の印を付けているので、それが無いものが対象。
+    壊れた録画で毎回失敗し続けないよう、試すのは 2 回まで。
+    """
     base = Path(cfg.work_dir) / channel
     for session_dir in sorted(base.glob("*/")) if base.exists() else []:
         video = session_dir / "stream.ts"
-        run_dir = Path(cfg.output_dir) / channel / session_dir.name
-        if not video.exists() or video.stat().st_size == 0 or (run_dir / "highlights.json").exists():
+        if (session_dir / "processed").exists() or not video.exists() or video.stat().st_size == 0:
             continue
+        attempts_file = session_dir / "attempts"
+        try:
+            attempts = int(attempts_file.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            attempts = 0
+        if attempts >= MAX_LEFTOVER_ATTEMPTS:
+            continue
+        attempts_file.write_text(str(attempts + 1), encoding="utf-8")
         log.info("前回処理されなかった録画を処理します: %s", video)
-        _run(cfg, channel, video, session_dir / "chat.jsonl", session_dir / "viewers.jsonl", run_dir, [], None,
-             None, dry_run)
+        _run(cfg, channel, video, session_dir / "chat.jsonl", session_dir / "viewers.jsonl",
+             Path(cfg.output_dir) / channel / session_dir.name, [], None, None, dry_run)
+        _mark(session_dir, "processed")
 
 
 def watch(cfg: Config, channel: str, once: bool = False, dry_run: bool = False) -> None:
     _stop_on_terminate()
-    process_leftovers(cfg, channel, dry_run)
+    # 前回の残りは裏で処理する (その間に配信が始まっても録画を始められるように)
+    threading.Thread(target=process_leftovers, args=(cfg, channel, dry_run), daemon=True,
+                     name="leftovers").start()
     checker = LiveChecker(cfg)
     while True:
         wait_until_live(cfg, channel, checker)

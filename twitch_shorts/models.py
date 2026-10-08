@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 
+def normalize_hashtag(tag: str) -> str:
+    """"#タグ" の形にそろえる (全角の ＃ や、# が無いものも)。空なら空文字。"""
+    t = str(tag).strip().lstrip("#＃").strip()
+    return f"#{t}" if t else ""
+
+
 @dataclass
 class ChatMessage:
     """配信開始(またはVOD先頭)からの秒数 ``offset`` を持つチャット1件。"""

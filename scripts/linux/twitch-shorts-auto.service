@@ -11,6 +11,8 @@ Restart=on-failure
 RestartSec=60
 # 停止時は録画済みの分を処理してから終了するので、時間に余裕を持たせる
 TimeoutStopSec=1h
+# 停止の合図は本体だけに送る (書き出し中の ffmpeg まで止めない)
+KillMode=mixed
 
 [Install]
 WantedBy=default.target

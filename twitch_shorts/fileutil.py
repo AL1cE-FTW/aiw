@@ -4,18 +4,66 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
 def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
     """JSON を一時ファイルに書いてから置き換える (途中で止まっても元のファイルが壊れない)。
 
-    private: 最初から自分だけが読める権限 (0600) で作る (Windows では権限指定は無視される)。
+    一時ファイルは毎回新しく作るので、同時に書き込む別プロセスと混ざらない。
+    private: 自分だけが読める権限 (0600) にする (Windows では権限指定は無視される)。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o666)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)  # 常に 0600 で新規作成
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        if not private:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def file_lock(path: str | Path, timeout: float = 30.0, stale: float = 600.0):
+    """別のプロセスと同じファイルを読み書きするときの簡易ロック (``<path>.lock`` を作る)。
+
+    取れないまま timeout 秒たった場合や、ロックが stale 秒より古い (前回の異常終了の残り) 場合は奪う。
+    """
+    lock = Path(str(path) + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                too_old = time.time() - lock.stat().st_mtime > stale
+            except OSError:
+                continue  # ちょうど消えた
+            if too_old or time.time() > deadline:
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+                continue
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
