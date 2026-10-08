@@ -713,6 +713,7 @@ def test_leftover_recordings_are_processed_once(make_stream, tmp_path):
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts",
                     str(session / "stream.ts")], check=True)
     shutil.copy(chat_path, session / "chat.jsonl")
+    watcher._save_parts(session, [(session / "stream.ts", 0.0)])
     watcher.process_leftovers(cfg, "yuuki_ftw")
     report = tmp_path / "out" / "yuuki_ftw" / "20261008_200000" / "highlights.json"
     assert report.exists()
@@ -806,6 +807,7 @@ def _session(tmp_path, make_stream, name="20261008_200000"):
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-c", "copy", "-f", "mpegts",
                     str(session / "stream.ts")], check=True)
     shutil.copy(chat_path, session / "chat.jsonl")
+    watcher._save_parts(session, [(session / "stream.ts", 0.0)])
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
     cfg.render.width, cfg.render.height = 360, 640
     return cfg, session
@@ -826,6 +828,7 @@ def test_leftover_gives_up_after_two_attempts(tmp_path, monkeypatch):
     session = tmp_path / "work" / "yuuki_ftw" / "broken"
     session.mkdir(parents=True)
     (session / "stream.ts").write_bytes(b"not a video")
+    watcher._save_parts(session, [(session / "stream.ts", 0.0)])
     runs = []
     monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: runs.append(1) or None)  # 失敗し続ける
     for _ in range(4):
@@ -992,7 +995,7 @@ def test_recorder_restarts_in_same_session_while_still_live(tmp_path, monkeypatc
     monkeypatch.setattr(watcher, "start_live_recording", fake_rec)
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
     monkeypatch.setattr(watcher, "_sleep_checking_stop", lambda s: None)
-    monkeypatch.setattr(watcher, "_final_pass", lambda cfg, ch, h, st, ss, session_dir, *a: finals.append(
+    monkeypatch.setattr(watcher, "_final_pass", lambda cfg, ch, h, st, ss, session_dir, *a, **k: finals.append(
         [p.name for p, _ in watcher._load_parts(session_dir)]) or [])
     watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
                                helix=Helix())
@@ -1090,7 +1093,7 @@ def test_recorder_gives_up_after_quick_failures_and_waits_for_end(tmp_path, monk
     waited = []
     monkeypatch.setattr(watcher, "start_live_recording", fake_rec)
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
-    monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: True)
     monkeypatch.setattr(watcher, "_wait_until_offline", lambda *a: waited.append(1))
     monkeypatch.setattr(watcher, "_sleep_checking_stop", lambda s: None)
     monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
@@ -1183,7 +1186,7 @@ def test_restart_failure_still_runs_final_pass(tmp_path, monkeypatch):
     finals = []
     monkeypatch.setattr(watcher, "start_live_recording", rec)
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
-    monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: True)
     monkeypatch.setattr(watcher, "_sleep_checking_stop", lambda s: None)
     monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: finals.append(1) or [])
     watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
@@ -1245,7 +1248,7 @@ def test_leftover_uses_vod_first_when_meta_known(make_stream, tmp_path, monkeypa
     watcher._save_meta(session, start_time=1000.0, stream_started=900.0)
     calls = []
     monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: None)
-    monkeypatch.setattr(watcher, "_final_pass", lambda cfg, ch, h, st, ss, *a: calls.append((st, ss)) or [])
+    monkeypatch.setattr(watcher, "_final_pass", lambda cfg, ch, h, st, ss, *a, **k: calls.append((st, ss)) or [])
     watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
     assert calls == [(1000.0, 900.0)] and (session / "processed").exists()
 
@@ -1292,7 +1295,7 @@ def test_stop_before_restarting_recorder(tmp_path, monkeypatch):
 
     monkeypatch.setattr(watcher, "start_live_recording", rec)
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
-    monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: True)
     monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -1301,3 +1304,108 @@ def test_stop_before_restarting_recorder(tmp_path, monkeypatch):
     finally:
         watcher._STOP.clear()
     assert starts == ["stream.ts"]
+
+
+# --- 12 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_dry_run_leftover_does_not_mark_real_session(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    watcher._save_meta(session, start_time=1000.0)
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: [])
+    watcher.process_leftovers(cfg, "yuuki_ftw", dry_run=True)
+    assert not (session / "dry_run").exists() and not (session / "processed").exists()
+
+
+def test_final_pass_excludes_shorts_made_from_same_vod(make_stream, tmp_path, monkeypatch):
+    import json as _json
+
+    cfg, session = _session(tmp_path, make_stream)
+    other = session.parent / "20261008_190000"
+    other.mkdir()
+    watcher._save_meta(other, vod_id="v1")
+    out_other = tmp_path / "out" / "yuuki_ftw" / other.name
+    out_other.mkdir(parents=True)
+    out_other.joinpath("highlights.json").write_text(_json.dumps({"highlights": [
+        {"start": 10.0, "end": 40.0, "peak": 20.0, "score": 1.0, "output_path": "a.mp4"}]}), encoding="utf-8")
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 9999.0))
+    seen = []
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a: seen.append(a[-1]) or [])
+    out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False)
+    assert out == [] and [h.start for h in seen[0]] == [10.0]
+
+
+def test_final_pass_skips_vod_done_by_latest(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    (tmp_path / "work" / "processed_vods.json").write_text('["v1"]', encoding="utf-8")
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 9999.0))
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: pytest.fail("latest で作成済みの VOD を作った"))
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: pytest.fail("録画から作った"))
+    assert watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False) == []
+    assert (session / "processed").exists()
+
+
+def test_failing_to_save_vod_id_does_not_crash(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 9999.0))
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: [])
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(watcher, "_save_meta", boom)
+    assert watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False) == []
+
+
+def test_leftover_without_stream_start_does_not_use_current_stream(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    seen = []
+    monkeypatch.setattr(watcher, "_stream_started_at", lambda *a: pytest.fail("いまの配信の開始時刻を使った"))
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda h, c, rs, ss=None: seen.append(ss))
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: [])
+    watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, None, session, tmp_path / "o", False, leftover=True)
+    assert seen == [None]
+
+
+def test_legacy_session_without_parts_is_never_reprocessed(tmp_path, monkeypatch):
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    session = tmp_path / "work" / "yuuki_ftw" / "old"
+    session.mkdir(parents=True)
+    (session / "stream.ts").write_bytes(b"x")  # 結果のフォルダーは消されている
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: pytest.fail("古い録画を処理した"))
+    watcher.process_leftovers(cfg, "yuuki_ftw")
+
+
+def test_still_live_uses_checker_without_api():
+    assert watcher._still_live(None, "ch", _Checker(True)) is True
+
+
+def test_leftovers_check_live_only_for_candidates(tmp_path):
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    for name in ("a", "b", "c"):
+        d = tmp_path / "work" / "yuuki_ftw" / name
+        d.mkdir(parents=True)
+        (d / "processed").write_text("x")
+
+    class Counting(_Checker):
+        n = 0
+
+        def is_live(self, channel):
+            Counting.n += 1
+            return False
+
+    watcher.process_leftovers(cfg, "yuuki_ftw", checker=Counting(False))
+    assert Counting.n == 0
+
+
+def test_vod_work_dir_is_removed(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    work = tmp_path / "work" / "vod_v1" / f"auto_{session.name}"
+
+    def fake_process(*a, **k):
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "audio.wav").write_bytes(b"x")
+        raise RuntimeError("download failed")
+
+    monkeypatch.setattr(watcher, "process", fake_process)
+    assert watcher._run_from_vod(cfg, "yuuki_ftw", ("v1", 0.0, 100.0), session, tmp_path / "o", False) is None
+    assert not work.exists()
