@@ -333,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("channel")
     sp.add_argument("--rolling", type=int, help="配信中も N 分ごとに作る (同じ PC で配信している場合は 0 推奨)")
     sp.add_argument("--no-twitch-clips", action="store_true", help="Twitch の公式クリップは作らない")
-    add_render_opts(sp)
+    add_render_opts(sp, twitch_clips=False)  # auto はログイン状態から自動で決める
     sp.set_defaults(func=cmd_auto)
 
     sp = sub.add_parser("login", help="配信者アカウントで Twitch にログイン (公式クリップの自動作成用)")

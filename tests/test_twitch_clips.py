@@ -822,8 +822,7 @@ def test_leftover_gives_up_after_two_attempts(tmp_path, monkeypatch):
     session.mkdir(parents=True)
     (session / "stream.ts").write_bytes(b"not a video")
     runs = []
-    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: runs.append(1) or [])
-    monkeypatch.setattr(watcher, "_mark", lambda *a: None)  # 処理に失敗し続ける想定
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: runs.append(1) or None)  # 失敗し続ける
     for _ in range(4):
         watcher.process_leftovers(cfg, "yuuki_ftw")
     assert len(runs) == 2
@@ -1017,3 +1016,95 @@ def test_clips_only_for_rendered_shorts(make_stream, tmp_path, monkeypatch):
     monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", lambda *a, **k: pytest.fail("書き出せていない場面のクリップ"))
     pipeline.process(cfg, pipeline.LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0),
                      channel="yuuki_ftw")
+
+
+
+# --- 9 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_failed_session_with_partial_report_is_retried(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    watcher._save_parts(session, [(session / "stream.ts", 0.0)])
+    run_dir = tmp_path / "out" / "yuuki_ftw" / session.name
+    run_dir.mkdir(parents=True)
+    (run_dir / "highlights.json").write_text("{}", encoding="utf-8")  # 途中まで書けて失敗した
+    runs = []
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: runs.append(1) or [])
+    watcher.process_leftovers(cfg, "yuuki_ftw")
+    assert runs == [1] and (session / "processed").exists()
+
+
+def test_interrupted_leftover_does_not_use_up_attempts(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watcher, "_run_from_recording", killed)
+    with pytest.raises(KeyboardInterrupt):
+        watcher.process_leftovers(cfg, "yuuki_ftw")
+    assert not (session / "attempts").exists()
+
+
+def test_vod_that_ends_before_the_session_is_not_used(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)  # 録画は 100 秒
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 50.0, 20.0))  # VOD は 20 秒で終わっている
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: pytest.fail("録画の途中で終わる VOD を使った"))
+    out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session,
+                              tmp_path / "out" / "yuuki_ftw" / session.name, False)
+    assert out and out[0].output_path
+
+
+def test_recorder_gives_up_after_quick_failures_and_waits_for_end(tmp_path, monkeypatch):
+    starts = []
+
+    class Proc:
+        returncode = 0
+        stderr = None
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_rec(c, out, r, q):
+        out.write_bytes(b"data")
+        starts.append(out.name)
+        return Proc()
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            self.out_path.write_text("", encoding="utf-8")
+
+        def stop(self):
+            pass
+
+    waited = []
+    monkeypatch.setattr(watcher, "start_live_recording", fake_rec)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher, "_still_live", lambda h, c: True)
+    monkeypatch.setattr(watcher, "_wait_until_offline", lambda *a: waited.append(1))
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
+    watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
+                               helix=object())
+    assert len(starts) == watcher.MAX_RECORDER_RESTARTS and waited == [1]
+
+
+def test_file_lock_is_not_stolen_while_held(tmp_path):
+    from twitch_shorts.fileutil import file_lock
+
+    target = tmp_path / "x.json"
+    with file_lock(target):
+        with pytest.raises(TimeoutError):
+            with file_lock(target, timeout=0.3):
+                pass
+    with file_lock(target, timeout=0.3):  # 解放後は取れる
+        pass
+
+
+def test_auto_has_no_twitch_clips_flag():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["auto", "ch", "--twitch-clips"])

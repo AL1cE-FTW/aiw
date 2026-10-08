@@ -34,10 +34,11 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
 
 
 @contextmanager
-def file_lock(path: str | Path, timeout: float = 30.0, stale: float = 600.0):
+def file_lock(path: str | Path, timeout: float = 120.0, stale: float = 600.0):
     """別のプロセスと同じファイルを読み書きするときの簡易ロック (``<path>.lock`` を作る)。
 
-    取れないまま timeout 秒たった場合や、ロックが stale 秒より古い (前回の異常終了の残り) 場合は奪う。
+    ロックが stale 秒より古い (前回の異常終了の残り) 場合だけ奪う。使用中のロックは奪わず、
+    timeout 秒待っても取れなければ TimeoutError。
     """
     lock = Path(str(path) + ".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -53,12 +54,14 @@ def file_lock(path: str | Path, timeout: float = 30.0, stale: float = 600.0):
                 too_old = time.time() - lock.stat().st_mtime > stale
             except OSError:
                 continue  # ちょうど消えた
-            if too_old or time.time() > deadline:
+            if too_old:
                 try:
                     lock.unlink()
                 except OSError:
                     pass
                 continue
+            if time.time() > deadline:
+                raise TimeoutError(f"{lock} を使っている別の処理が終わりません")
             time.sleep(0.1)
     try:
         yield
