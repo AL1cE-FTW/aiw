@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 
 import requests
 
@@ -89,14 +91,37 @@ def clip_window(h: Highlight, shift: float = 0.0) -> tuple[float, float]:
     return end, duration
 
 
+def _load_registry(path: Path | None) -> list[dict]:
+    if not path or not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _find_existing(registry: list[dict], vod_id: str, end: float) -> dict | None:
+    """同じ VOD のほぼ同じ位置 (終わり位置が 10 秒以内) に、以前作ったクリップがあれば返す。"""
+    return next((r for r in registry if r.get("vod_id") == vod_id and abs(float(r.get("end", -1e9)) - end) < 10), None)
+
+
 def create_clips(creator: ClipCreator, vod_id: str, highlights: list[Highlight],
-                 shift: float = 0.0, limit: int = 5) -> list[Highlight]:
-    """ハイライトごとにクリップを作り、URL を ``h.twitch_clip`` に記録する。失敗しても他は続ける。"""
+                 shift: float = 0.0, limit: int = 5, registry: Path | None = None) -> list[Highlight]:
+    """ハイライトごとにクリップを作り、URL を ``h.twitch_clip`` に記録する。失敗しても他は続ける。
+
+    registry: 作ったクリップの記録 (JSON)。同じ VOD を処理し直しても同じ場面のクリップを重複して作らない。
+    """
+    known = _load_registry(registry)
     made: list[Highlight] = []
     for h in sorted(highlights, key=lambda h: h.score, reverse=True)[:limit]:
         if h.twitch_clip:
             continue
         end, duration = clip_window(h, shift)
+        existing = _find_existing(known, vod_id, end)
+        if existing:
+            h.twitch_clip = existing["url"]
+            log.info("作成済みの Twitch クリップを使います: %s", h.twitch_clip)
+            continue
         try:
             clip = creator.from_vod(vod_id, end, duration, h.title)
         except ClipError as e:
@@ -104,7 +129,15 @@ def create_clips(creator: ClipCreator, vod_id: str, highlights: list[Highlight],
             if "権限" in str(e):
                 break
             continue
+        except (requests.RequestException, ValueError, KeyError) as e:  # 通信エラー・想定外の応答
+            log.warning("Twitch クリップを作れませんでした (%s): %s", h.title, e)
+            continue
         h.twitch_clip = clip.get("edit_url") or f"https://clips.twitch.tv/{clip.get('id', '')}"
         log.info("Twitch クリップを作成: %s  %s", h.title, h.twitch_clip)
         made.append(h)
+        known.append({"vod_id": vod_id, "end": round(end, 1), "duration": duration, "url": h.twitch_clip,
+                      "id": clip.get("id", ""), "title": h.title})
+        if registry:
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(json.dumps(known, ensure_ascii=False, indent=2), encoding="utf-8")
     return made

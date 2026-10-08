@@ -143,7 +143,7 @@ def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
 def cmd_auto(cfg: Config, args: argparse.Namespace) -> int:
     """配信の検知 → 録画 → ショート作成 (+ Twitch クリップ作成) → 次の配信を待つ、を繰り返す。"""
     from .doctor import print_checks, run_checks
-    from .twitch_auth import load_token
+    from .twitch_auth import can_create_clips, load_token
     from .watcher import watch
 
     channel = args.channel.lower()
@@ -155,10 +155,12 @@ def cmd_auto(cfg: Config, args: argparse.Namespace) -> int:
     has_keys = bool(cfg.twitch.client_id and cfg.twitch.client_secret)
     if args.no_twitch_clips:
         cfg.clips.enabled = False
-    elif token and has_keys and token.get("login", "").lower() == channel:
+    elif has_keys and can_create_clips(token, channel):
         cfg.clips.enabled = True
-    elif cfg.clips.enabled or token:
-        print("※ Twitch クリップは作りません (API キーと、このチャンネルの配信者アカウントでの login が必要)")
+    else:
+        if cfg.clips.enabled or token:
+            print("※ Twitch クリップは作りません (API キーと、このチャンネルの配信者アカウントでの "
+                  "twitch-shorts login が必要です)")
         cfg.clips.enabled = False
     if args.rolling is not None:
         cfg.watch.rolling_minutes = args.rolling

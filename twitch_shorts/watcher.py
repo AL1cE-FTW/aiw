@@ -63,6 +63,7 @@ def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]
 
     proc = start_live_recording(channel, video_path, cfg.watch.recorder, cfg.watch.quality)
     start_time = time.time()
+    stream_started = _stream_started_at(helix, channel)
     chat_rec = LiveChatRecorder(channel, chat_path, start_time, cfg.twitch.irc_oauth_token, cfg.twitch.irc_nick)
     chat_rec.start()
     viewer_rec = None
@@ -81,7 +82,7 @@ def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]
             return None
         if "vod" not in vod_cache:
             try:
-                found = find_stream_vod(helix, channel, start_time)
+                found = find_stream_vod(helix, channel, start_time, stream_started)
             except Exception as e:
                 log.warning("この配信の VOD を確認できませんでした: %s", e)
                 return None
@@ -124,13 +125,37 @@ def record_and_process(cfg: Config, channel: str, helix=None) -> list[Highlight]
     return done
 
 
-def find_stream_vod(helix, channel: str, record_start: float) -> tuple[str, float] | None:
-    """録画中の配信の VOD と、録画の 0 秒が VOD の何秒目か (= 録画開始の遅れ) を返す。"""
+def _stream_started_at(helix, channel: str) -> float | None:
+    """配信の開始時刻 (VOD の 0 秒に当たる)。取れなければ None。"""
+    if helix is None:
+        return None
+    try:
+        stream = helix.get_stream(channel)
+        if stream and stream.get("started_at"):
+            from .twitch_api import parse_rfc3339
+
+            return parse_rfc3339(stream["started_at"]).timestamp()
+    except Exception as e:
+        log.debug("配信の開始時刻を取得できませんでした: %s", e)
+    return None
+
+
+def find_stream_vod(helix, channel: str, record_start: float,
+                    stream_started: float | None = None) -> tuple[str, float] | None:
+    """録画中の配信の VOD と、録画の 0 秒が VOD の何秒目か (= 録画開始の遅れ) を返す。
+
+    stream_started: 配信の開始時刻 (Get Streams の started_at)。分かればそれと VOD の開始が一致するものを選ぶ。
+    分からなければ「録画開始より前に始まり、録画開始の時点まで続いている」VOD を選ぶ。
+    前回の配信の VOD を取り違えないよう、どちらにも当てはまらなければ None。
+    """
     user_id = helix.get_user_id(channel)
     for v in helix.get_recent_archives(user_id, 3):
         started = v.created_at.timestamp()
-        # 配信開始 (VOD の 0 秒) は録画開始より前で、同じ配信なら離れすぎていない
-        if started <= record_start + 120 and record_start - started < 48 * 3600:
+        if stream_started is not None:
+            same = abs(started - stream_started) <= 600
+        else:
+            same = started <= record_start + 120 and started + v.duration >= record_start - 600
+        if same:
             return v.id, max(0.0, record_start - started)
     return None
 

@@ -80,14 +80,28 @@ class RunResult:
     score: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 
-def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
+class _KeepUnknown(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _template_vars(h: Highlight, index: int, channel: str) -> dict:
     top = Counter(s.rsplit(" (x", 1)[0] for s in h.chat_sample).most_common(1)
-    return cfg.render.title_template.format(
-        channel=channel,
-        index=index,
-        date=datetime.now().strftime("%Y-%m-%d"),
-        top_chat=top[0][0] if top else "",
-    ).strip()
+    return {"channel": channel, "index": index, "date": datetime.now().strftime("%Y-%m-%d"),
+            "top_chat": top[0][0] if top else ""}
+
+
+def fill_template(template: str, values: dict) -> str:
+    """{channel} などを埋める。知らない変数や {} の書き間違いがあってもエラーにしない。"""
+    try:
+        return template.format_map(_KeepUnknown(values)).strip()
+    except (ValueError, IndexError, AttributeError):
+        log.warning("テンプレートを解釈できないため、そのまま使います: %s", template)
+        return template.strip()
+
+
+def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
+    return fill_template(cfg.render.title_template, _template_vars(h, index, channel))
 
 
 def process(
@@ -176,7 +190,7 @@ def process(
     for i, h in enumerate(selected, start=start_index):
         if not h.title:
             h.title = default_title(cfg, h, i, channel)
-        _fill_post_text(cfg, h, channel)
+        _fill_post_text(cfg, h, channel, i)
         if clip_vod:
             h.vod_url = vod_timestamp_url(clip_vod[0], h.start + clip_vod[1])
         if dry_run:
@@ -189,7 +203,8 @@ def process(
         h.output_path = str(out)
 
     if cfg.clips.enabled and clip_vod and selected and not dry_run:
-        _make_twitch_clips(cfg, selected, clip_vod, already=sum(1 for e in exclude if e.twitch_clip))
+        _make_twitch_clips(cfg, selected, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
+                           channel=channel)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
     try:
         from .review import write_review_page
@@ -209,10 +224,11 @@ def process(
     return RunResult(selected, run_dir, score)
 
 
-def _fill_post_text(cfg: Config, h: Highlight, channel: str) -> None:
+def _fill_post_text(cfg: Config, h: Highlight, channel: str, index: int = 1) -> None:
     """投稿用の説明文・ハッシュタグを補う (AI が付けていればそれを優先)。"""
     if not h.description:
-        h.description = cfg.publish.description_template.format(channel=channel or "配信").strip()
+        h.description = fill_template(cfg.publish.description_template,
+                                      _template_vars(h, index, channel or "配信"))
     tags = list(h.hashtags)
     for t in cfg.publish.hashtags:
         if t.lower() not in {x.lower() for x in tags}:
@@ -222,11 +238,15 @@ def _fill_post_text(cfg: Config, h: Highlight, channel: str) -> None:
 
 def vod_timestamp_url(video_id: str, seconds: float) -> str:
     """VOD の指定位置を開く URL (Twitch の ?t=1h2m3s 形式)。"""
+    from .download import vod_url
+
     t = max(0, int(seconds))
-    return f"https://www.twitch.tv/videos/{video_id}?t={t // 3600}h{t % 3600 // 60}m{t % 60}s"
+    return f"{vod_url(video_id)}?t={t // 3600}h{t % 3600 // 60}m{t % 60}s"
 
 
-def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple[str, float], already: int) -> None:
+def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple[str, float], already: int,
+                       channel: str) -> None:
+    """Twitch の公式クリップを作る。任意の機能なので、失敗してもショートの結果には影響させない。"""
     from .twitch_auth import TwitchAuthError, UserToken
     from .twitch_clips import ClipCreator, create_clips
 
@@ -238,10 +258,16 @@ def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple
     except TwitchAuthError as e:
         log.warning("Twitch クリップは作りません: %s", e)
         return
+    # クリップは配信者本人のアカウントでのみ作れる (他のチャンネルの VOD には作らない)
+    if not channel or token.login.lower() != channel.lower():
+        log.warning("Twitch クリップは作りません: ログイン中のアカウント (%s) とチャンネル (%s) が違います",
+                    token.login or "?", channel or "不明")
+        return
     vod_id, shift = clip_vod
     try:
-        create_clips(ClipCreator(cfg.twitch.client_id, token), vod_id, highlights, shift, limit)
-    except TwitchAuthError as e:  # トークン更新の失敗など。ショート自体は作れているので続ける
+        create_clips(ClipCreator(cfg.twitch.client_id, token), vod_id, highlights, shift, limit,
+                     registry=Path(cfg.work_dir) / "twitch_clips.json")
+    except Exception as e:  # 通信エラー等。ショート自体は作れているので続ける
         log.warning("Twitch クリップを作れませんでした: %s", e)
 
 

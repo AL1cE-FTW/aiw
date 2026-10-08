@@ -11,6 +11,8 @@ Twitch の公式クリップを作るには、配信者本人 (または編集�
 from __future__ import annotations
 
 import json
+import logging
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -24,10 +26,20 @@ DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 # 自分のチャンネルのクリップ作成 (VOD から / 配信中)
 SCOPES = "channel:manage:clips clips:edit"
 TOKEN_FILE = "twitch_user_token.json"
+CLIP_SCOPE = "channel:manage:clips"
+
+log = logging.getLogger(__name__)
 
 
 class TwitchAuthError(RuntimeError):
     pass
+
+
+def can_create_clips(token: dict | None, channel: str = "") -> bool:
+    """このトークンで (指定チャンネルの) クリップを作れるか。クリップは配信者本人のアカウントで作る。"""
+    if not token or CLIP_SCOPE not in (token.get("scopes") or []):
+        return False
+    return not channel or token.get("login", "").lower() == channel.lower()
 
 
 def token_path(work_dir: str | Path) -> Path:
@@ -96,18 +108,26 @@ def _with_identity(token: dict, session: requests.Session) -> dict:
 def save_token(work_dir: str | Path, token: dict) -> None:
     p = token_path(work_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(token, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 書き込み途中で電源が落ちても壊れないよう、別ファイルに書いてから置き換える
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(token, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        p.chmod(0o600)  # 自分だけが読めるように (Windows では無視される)
+        tmp.chmod(0o600)  # 自分だけが読めるように (Windows では無視される)
     except OSError:
         pass
+    os.replace(tmp, p)
 
 
 def load_token(work_dir: str | Path) -> dict | None:
     p = token_path(work_dir)
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        token = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log.warning("ログイン情報 (%s) が壊れています。twitch-shorts login をやり直してください", p)
+        return None
+    return token if isinstance(token, dict) and token.get("access_token") else None
 
 
 class UserToken:

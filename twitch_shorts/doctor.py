@@ -9,13 +9,13 @@ import subprocess
 from dataclasses import dataclass
 
 from .config import Config
-from .twitch_auth import load_token
+from .twitch_auth import can_create_clips, load_token
 
 
 @dataclass
 class Check:
     name: str
-    ok: bool
+    ok: bool | None  # None = 確認できなかった
     detail: str
     required: bool = True
 
@@ -37,10 +37,18 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
     checks: list[Check] = []
     ff = shutil.which("ffmpeg") and shutil.which("ffprobe")
     checks.append(Check("ffmpeg", bool(ff), shutil.which("ffmpeg") or "インストールして PATH を通してください"))
-    rec = shutil.which("streamlink") or (_has_module("yt_dlp") and "yt-dlp")
-    checks.append(Check("録画ツール (streamlink / yt-dlp)", bool(rec), rec or "pip install yt-dlp"))
+    streamlink = shutil.which("streamlink")
+    ytdlp = _has_module("yt_dlp")
+    want = cfg.watch.recorder
+    if want == "streamlink":
+        checks.append(Check("録画ツール (streamlink)", bool(streamlink), streamlink or "Streamlink をインストールしてください"))
+    elif want == "yt-dlp":
+        checks.append(Check("録画ツール (yt-dlp)", ytdlp, "yt-dlp" if ytdlp else "pip install yt-dlp"))
+    else:
+        checks.append(Check("録画ツール (streamlink / yt-dlp)", bool(streamlink or ytdlp),
+                            streamlink or ("yt-dlp" if ytdlp else "pip install yt-dlp")))
     ok, detail = _japanese_font()
-    checks.append(Check("日本語フォント", ok is not False, detail, required=False))
+    checks.append(Check("日本語フォント", ok, detail, required=False))
 
     keys = bool(cfg.twitch.client_id and cfg.twitch.client_secret)
     checks.append(Check("Twitch API キー", keys,
@@ -57,12 +65,14 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
 
     token = load_token(cfg.work_dir)
     if token:
-        scopes = token.get("scopes") or []
-        can_clip = "channel:manage:clips" in scopes or "editor:manage:clips" in scopes
-        checks.append(Check("Twitch ログイン (クリップ作成)", can_clip,
-                            f"{token.get('login', '?')} でログイン済み" if can_clip
-                            else "クリップ作成の許可がありません。twitch-shorts login をやり直してください",
-                            required=False))
+        login = token.get("login", "?")
+        if not can_create_clips(token):
+            detail = "クリップ作成の許可がありません。twitch-shorts login をやり直してください"
+        elif not can_create_clips(token, channel):
+            detail = f"{login} でログイン中ですが、{channel} のクリップは配信者本人のアカウントでしか作れません"
+        else:
+            detail = f"{login} でログイン済み"
+        checks.append(Check("Twitch ログイン (クリップ作成)", can_create_clips(token, channel), detail, required=False))
     else:
         checks.append(Check("Twitch ログイン (クリップ作成)", False,
                             "未ログイン。Twitch の公式クリップも作るなら twitch-shorts login", required=False))
@@ -80,6 +90,6 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
 def print_checks(checks: list[Check]) -> bool:
     """結果を表示し、必須項目がすべて OK なら True を返す。"""
     for c in checks:
-        mark = "OK " if c.ok else ("NG " if c.required else "-- ")
+        mark = "OK " if c.ok else "?? " if c.ok is None else ("NG " if c.required else "-- ")
         print(f"  [{mark}] {c.name}: {c.detail}")
     return all(c.ok for c in checks if c.required)

@@ -150,7 +150,7 @@ def test_pipeline_creates_clips_when_enabled(make_stream, tmp_path, monkeypatch)
 
     monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", fake_from_vod)
     r = process(cfg, LocalSource(str(video)), load_chat(chat_path), tmp_path / "out" / "run",
-                clip_vod=("v1", 30.0))
+                clip_vod=("v1", 30.0), channel="yuuki_ftw")
     [h] = r.highlights
     [(vod_id, end, dur)] = made
     assert vod_id == "v1" and end == pytest.approx(h.end + 30) and dur == pytest.approx(h.end - h.start)
@@ -183,3 +183,119 @@ def test_doctor_command(tmp_path, capsys):
     assert cli.main(["-c", str(conf), "doctor"]) == 0
     out = capsys.readouterr().out
     assert "ffmpeg" in out and "Twitch ログイン" in out
+
+
+
+# --- レビュー指摘の回帰テスト -------------------------------------------------
+
+def test_find_stream_vod_rejects_previous_stream():
+    yesterday = datetime(2026, 10, 7, 11, 0, tzinfo=timezone.utc)
+
+    class FakeHelix:
+        def get_user_id(self, login):
+            return "42"
+
+        def get_recent_archives(self, uid, count):
+            return [VideoInfo("old", "42", "yuuki_ftw", "Y", "t", yesterday, 3 * 3600, "u")]
+
+    today = yesterday.timestamp() + 86400
+    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", today) is None
+    # 配信の開始時刻が分かれば、それと一致する VOD だけを使う
+    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", today, stream_started=today - 60) is None
+    assert watcher.find_stream_vod(FakeHelix(), "yuuki_ftw", yesterday.timestamp() + 30,
+                                   stream_started=yesterday.timestamp()) == ("old", 30)
+
+
+def _clip_setup(tmp_path, make_stream):
+    from twitch_shorts.chat import load_chat
+
+    video, chat_path = make_stream(duration=100, events=(50,))
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.render.width, cfg.render.height = 360, 640
+    cfg.clips.enabled = True
+    _token(cfg.work_dir)
+    return cfg, video, load_chat(chat_path)
+
+
+def test_clips_are_not_duplicated_on_rerun(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.pipeline import LocalSource, process
+
+    cfg, video, chat = _clip_setup(tmp_path, make_stream)
+    calls = []
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod",
+                        lambda self, v, e, d, t="": calls.append(e) or {"id": "C", "edit_url": "https://clips.twitch.tv/C"})
+    for _ in range(2):
+        r = process(cfg, LocalSource(str(video)), chat, tmp_path / "out" / "run", clip_vod=("v1", 0.0),
+                    channel="yuuki_ftw", dry_run=False)
+        assert r.highlights[0].twitch_clip == "https://clips.twitch.tv/C"
+    assert len(calls) == 1  # 2 回目は記録済みのクリップを使う
+
+
+def test_clips_skipped_for_other_channels_and_errors_do_not_abort(make_stream, tmp_path, monkeypatch):
+    import requests
+
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.pipeline import LocalSource, process
+
+    cfg, video, chat = _clip_setup(tmp_path, make_stream)
+    calls = []
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", lambda *a, **k: calls.append(a) or {})
+    r = process(cfg, LocalSource(str(video)), chat, tmp_path / "o1", clip_vod=("v1", 0.0), channel="someone_else")
+    assert calls == [] and r.highlights[0].twitch_clip == ""
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("network down")
+
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", boom)
+    r = process(cfg, LocalSource(str(video)), chat, tmp_path / "o2", clip_vod=("v1", 0.0), channel="yuuki_ftw")
+    assert r.highlights and (tmp_path / "o2" / "highlights.json").exists() and (tmp_path / "o2" / "index.html").exists()
+
+
+def test_templates_with_unknown_fields_do_not_crash():
+    from twitch_shorts.pipeline import _fill_post_text, fill_template
+
+    assert fill_template("{channel} #{index} {unknown}", {"channel": "y", "index": 2}) == "y #2 {unknown}"
+    assert fill_template("壊れた {", {"channel": "y"}) == "壊れた {"
+    cfg = Config()
+    cfg.publish.description_template = "{channel} 切り抜き #{index} ({date})"
+    h = Highlight(start=0, end=30, peak=10, score=1)
+    _fill_post_text(cfg, h, "yuuki_ftw", 3)
+    assert h.description.startswith("yuuki_ftw 切り抜き #3 (")
+
+
+def test_corrupt_token_is_treated_as_logged_out(tmp_path):
+    from twitch_shorts.twitch_auth import token_path
+
+    token_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    token_path(tmp_path).write_text('{"access_token": "x", "refr', encoding="utf-8")
+    assert load_token(tmp_path) is None
+    with pytest.raises(TwitchAuthError):
+        UserToken("cid", "", tmp_path)
+    _token(tmp_path)  # 保存し直すと読める
+    assert load_token(tmp_path)["login"] == "yuuki_ftw"
+
+
+def test_auto_requires_clip_scope(tmp_path, monkeypatch):
+    import twitch_shorts.watcher as w
+
+    seen = {}
+    monkeypatch.setattr(w, "watch", lambda cfg, channel, once=False: seen.update(clips=cfg.clips.enabled))
+    conf = tmp_path / "c.toml"
+    conf.write_text(f'work_dir = "{tmp_path / "work"}"\n[twitch]\nclient_id = "cid"\nclient_secret = "s"\n')
+    save_token(tmp_path / "work", {"access_token": "a", "refresh_token": "r", "expires_at": time.time() + 999,
+                                   "user_id": "42", "login": "yuuki_ftw", "scopes": ["user:read:email"]})
+    assert cli.main(["-c", str(conf), "auto", "yuuki_ftw"]) == 0
+    assert seen["clips"] is False
+
+
+def test_doctor_unknown_font_and_forced_recorder(monkeypatch):
+    from twitch_shorts import doctor
+
+    real_which = doctor.shutil.which
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n in ("fc-list", "streamlink") else real_which(n))
+    cfg = Config()
+    cfg.watch.recorder = "streamlink"
+    checks = {c.name: c for c in doctor.run_checks(cfg)}
+    assert checks["日本語フォント"].ok is None
+    assert checks["録画ツール (streamlink)"].ok is False  # yt-dlp があっても streamlink 指定なら NG
