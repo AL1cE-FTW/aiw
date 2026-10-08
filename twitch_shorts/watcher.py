@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import signal
@@ -22,7 +21,7 @@ from pathlib import Path
 from .chat import LiveChatRecorder, load_chat
 from .config import Config
 from .fileutil import add_processed_vod, processed_vods, read_json, write_json_atomic
-from .download import is_live_via_ytdlp, start_live_recording
+from .download import is_live_via_ytdlp, recorder_log_tail, start_live_recording
 from .models import ChatMessage, Highlight, ViewerSample
 from .pipeline import LocalSource, process
 from .viewers import ViewerRecorder, load_viewers
@@ -45,14 +44,15 @@ class LiveChecker:
 
             self.helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
 
-    def is_live(self, channel: str) -> bool:
+    def is_live(self, channel: str, default: bool = False) -> bool:
+        """配信中か。確認できなければ ``default`` を返す。"""
         try:
             if self.helix:
                 return self.helix.is_live(channel)
             return is_live_via_ytdlp(channel)
         except Exception as e:
             log.warning("配信状態の確認に失敗しました: %s", e)
-            return False
+            return default
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,8 @@ def _wait_background() -> None:
     for t in _BACKGROUND:
         if t.is_alive():
             log.info("前回の残りの処理が終わるのを待っています…")
-            t.join()
+        while t.is_alive():
+            t.join(timeout=1)  # 時間を区切って待つ (Windows でも Ctrl+C で強制終了できるように)
 
 
 def wait_until_live(cfg: Config, channel: str, checker: LiveChecker | None = None) -> None:
@@ -147,9 +148,8 @@ def _load_parts(session_dir: Path) -> list[tuple[Path, float]]:
     """録画ファイルと、それが録画開始から何秒目に始まったか。中身の無いファイルは除く。"""
     parts = [(session_dir / "stream.ts", 0.0)]
     try:
-        data = json.loads((session_dir / "parts.json").read_text(encoding="utf-8"))
-        parts = [(session_dir / d["file"], float(d["offset"])) for d in data]
-    except (OSError, ValueError, KeyError, TypeError):
+        parts = [(session_dir / d["file"], float(d["offset"])) for d in read_json(session_dir / "parts.json")]
+    except (ValueError, KeyError, TypeError):
         pass
     return [(p, o) for p, o in parts if p.exists() and p.stat().st_size > 0]
 
@@ -236,6 +236,9 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             # 録画が終わった: 配信が終わったのか、録画だけが途切れたのか確かめる
             if _STOP.is_set():
                 raise KeyboardInterrupt
+            tail = recorder_log_tail(proc)
+            if proc.returncode not in (0, None, -15) and tail:
+                log.warning("録画プロセスの出力: %s", tail)
             if not _still_live(helix, channel, checker):
                 break
             # すぐに終わってしまう録画が続く場合 (配信終了直後で API の反映が遅れている場合も含む) は、
@@ -273,8 +276,8 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         if viewer_rec:
             viewer_rec.stop()
 
-    if proc.returncode not in (0, None, -15) and proc.stderr:
-        log.warning("録画プロセスの出力: %s", proc.stderr.read().decode(errors="replace")[-500:])
+    if interrupted and proc.returncode not in (0, None, -15) and recorder_log_tail(proc):
+        log.warning("録画プロセスの出力: %s", recorder_log_tail(proc))
     if not _load_parts(session_dir):
         log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
         if interrupted or _STOP.is_set():
@@ -318,9 +321,17 @@ def _preview(cfg: Config, channel: str, session_dir: Path, part: tuple[Path, flo
     video, offset = part
     if not video.exists():
         return []
+    from .audio import probe_duration
+
+    # 広告を飛ばした分だけ録画は経過時間より短いので、実際に録れている長さも見る
+    recorded = elapsed - offset
+    try:
+        recorded = min(recorded, probe_duration(str(video)))
+    except Exception:
+        pass
     chat, viewers = _load_signals(session_dir, -offset)
     result = _process_recording(cfg, channel, video, chat, viewers, run_dir / "live" / video.stem, previews,
-                                elapsed - offset - LIVE_TAIL_MARGIN, dry_run, publish=False)
+                                recorded - LIVE_TAIL_MARGIN, dry_run, publish=False)
     return result or []
 
 
@@ -364,12 +375,17 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
                         "Twitch の設定で「過去の配信を保存」を有効にすると作れます)")
     result = None
     others = _highlights_of_vod(cfg, channel, vod[0], session_dir) if vod else []
+    if vod and others:
+        # 同じ VOD の他の部分は別のセッションが作っているので、この録画が録れている範囲から作る
+        window = (vod[1], vod[1] + _session_length(session_dir))
+    else:
+        window = None
     if vod and not others and vod[0] in processed_vods(cfg.work_dir):
         log.info("この配信の VOD (%s) は latest コマンドで作成済みです", vod[0])
         result = []
     elif vod:
         # 配信中に監視を再起動した場合など、同じ VOD から別のセッションで作った場面は除いて作る
-        result = _run_from_vod(cfg, channel, vod, session_dir, run_dir, dry_run, others)
+        result = _run_from_vod(cfg, channel, vod, session_dir, run_dir, dry_run, others, window)
         if result is not None and not dry_run:
             try:
                 _save_meta(session_dir, vod_id=vod[0])
@@ -404,7 +420,8 @@ def _highlights_of_vod(cfg: Config, channel: str, vod_id: str, me: Path) -> list
 
 
 def _run_from_vod(cfg: Config, channel: str, vod: tuple[str, float, float], session_dir: Path, run_dir: Path,
-                  dry_run: bool, exclude: list[Highlight] | None = None) -> list[Highlight] | None:
+                  dry_run: bool, exclude: list[Highlight] | None = None,
+                  window: tuple[float, float] | None = None) -> list[Highlight] | None:
     """録画の時刻で記録したチャット・視聴者数を VOD の時刻に直し、VOD から作る。
 
     VOD を取得できなかった (1 本も書き出せなかった) ら None を返し、録画から作り直してもらう。
@@ -420,7 +437,8 @@ def _run_from_vod(cfg: Config, channel: str, vod: tuple[str, float, float], sess
     try:
         result = process(cfg, VodSource(vod_url(vod_id), work, cfg.watch.quality), chat, run_dir,
                          duration=vod_duration, channel=channel, viewers=viewers, clip_vod=(vod_id, 0.0),
-                         dry_run=dry_run, exclude=exclude)
+                         dry_run=dry_run, exclude=exclude, available_from=window[0] if window else None,
+                         available_until=window[1] if window else None)
     except Exception as e:
         log.warning("VOD から作れなかったため、録画から作ります: %s", e)
         return None
@@ -513,15 +531,17 @@ def find_stream_vod_info(helix, channel: str, record_start: float, stream_starte
     (直前に終わった前回の配信の VOD は録画開始の時点で終わっているので選ばれない)。
     """
     user_id = user_id or helix.get_user_id(channel)
-    for v in helix.get_recent_archives(user_id, 3):
-        started = v.created_at.timestamp()
-        if stream_started is not None:
-            same = abs(started - stream_started) <= 600
-        else:
-            same = started <= record_start + 120 and started + v.duration > record_start + 60
-        if same:
-            return v.id, max(0.0, record_start - started), float(v.duration)
-    return None
+    archives = helix.get_recent_archives(user_id, 3)
+    if stream_started is not None:
+        # 開始時刻がいちばん近いもの (配信が落ちてすぐ立て直した場合、開始時刻の近い VOD が 2 本ある)
+        near = [v for v in archives if abs(v.created_at.timestamp() - stream_started) <= 600]
+        v = min(near, key=lambda v: abs(v.created_at.timestamp() - stream_started), default=None)
+    else:
+        v = next((v for v in archives if v.created_at.timestamp() <= record_start + 120
+                  and v.created_at.timestamp() + v.duration > record_start + 60), None)
+    if v is None:
+        return None
+    return v.id, max(0.0, record_start - v.created_at.timestamp()), float(v.duration)
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +580,7 @@ def process_leftovers(cfg: Config, channel: str, dry_run: bool = False, checker:
         if attempts >= MAX_LEFTOVER_ATTEMPTS:
             log.info("処理に %d 回失敗した録画は飛ばします: %s", attempts, session_dir)
             continue
-        if checker is not None and checker.is_live(channel):
+        if checker is not None and checker.is_live(channel, default=True):  # 確認できなければ配信中とみなす
             return
         meta = _load_meta(session_dir)
         if meta.get("vod_id"):  # VOD から作り終えた直後に止まった (印を付ける前)
@@ -590,7 +610,8 @@ def watch(cfg: Config, channel: str, once: bool = False, dry_run: bool = False) 
 
     def start_leftovers() -> None:
         # 前回の残りは裏で処理する (配信中は処理せず、配信が始まったら止まる)
-        if any(t.is_alive() for t in _BACKGROUND):
+        _BACKGROUND[:] = [t for t in _BACKGROUND if t.is_alive()]  # 終わったものは忘れる
+        if _BACKGROUND:
             return
         t = threading.Thread(target=process_leftovers, args=(cfg, channel, dry_run, checker), daemon=True,
                              name="leftovers")

@@ -109,7 +109,12 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         return 2
     helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
     videos = helix.get_recent_archives(helix.get_user_id(args.channel), args.count)
+    live = helix.get_stream(args.channel)
     for v in reversed(videos):
+        if live and _is_current_stream(v, live):
+            # 配信中の VOD は途中までしか無い。処理済みにすると残りが作られないので、配信が終わってから作る
+            log.info("配信中のため、配信が終わってから作ります: %s %s", v.id, v.title)
+            continue
         # auto / watch で作った VOD もここに記録される
         if v.id in processed_vods(cfg.work_dir) and not args.force:
             log.info("処理済みのためスキップ: %s %s", v.id, v.title)
@@ -121,6 +126,15 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         if not args.dry_run:
             add_processed_vod(cfg.work_dir, v.id)
     return 0
+
+
+def _is_current_stream(video, stream: dict) -> bool:
+    from .twitch_api import parse_rfc3339
+
+    try:
+        return abs(video.created_at.timestamp() - parse_rfc3339(stream["started_at"]).timestamp()) <= 600
+    except (KeyError, TypeError, ValueError):
+        return True  # 分からなければ、安全側 (配信中とみなして後回し) に倒す
 
 
 def cmd_login(cfg: Config, args: argparse.Namespace) -> int:

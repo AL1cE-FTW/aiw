@@ -115,6 +115,7 @@ def process(
     stream_title: str = "",
     exclude: list[Highlight] | None = None,
     available_until: float | None = None,
+    available_from: float | None = None,
     dry_run: bool = False,
     llm_client=None,
     viewers: list[ViewerSample] | None = None,
@@ -126,6 +127,7 @@ def process(
 
     exclude:          既に書き出したハイライト (ライブの逐次処理で重複させないため)
     available_until:  これより後ろにかかる区間は採用しない (録画中のファイル用)
+    available_from:   これより前にかかる区間は採用しない
     clip_vod:         (VOD の ID, ハイライトの時刻を VOD 上の時刻にするために足す秒数)。
                       clips.enabled のとき、この VOD から Twitch の公式クリップを作る
     clip_owner:       VOD の持ち主のチャンネル名 (省略時は channel)。クリップを作れるかの判定に使う
@@ -159,6 +161,7 @@ def process(
         h for h in candidates
         if not any(h.overlaps(e, margin=5) for e in exclude)
         and (available_until is None or h.end <= available_until)
+        and (available_from is None or h.start >= available_from)
     ]
     candidates = candidates[: n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1)]
     log.info("候補 %d 件を検出", len(candidates))

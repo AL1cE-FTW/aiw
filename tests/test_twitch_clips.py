@@ -1218,7 +1218,7 @@ class _Checker:
     def __init__(self, live, helix=None):
         self.live, self.helix = live, helix
 
-    def is_live(self, channel):
+    def is_live(self, channel, default=False):
         return self.live
 
 
@@ -1335,7 +1335,7 @@ def test_final_pass_excludes_shorts_made_from_same_vod(make_stream, tmp_path, mo
         {"start": 10.0, "end": 40.0, "peak": 20.0, "score": 1.0, "output_path": "a.mp4"}]}), encoding="utf-8")
     monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 9999.0))
     seen = []
-    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a: seen.append(a[-1]) or [])
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a: seen.append(a[-2]) or [])
     out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False)
     assert out == [] and [h.start for h in seen[0]] == [10.0]
 
@@ -1395,7 +1395,7 @@ def test_leftovers_check_live_only_for_candidates(tmp_path):
     class Counting(_Checker):
         n = 0
 
-        def is_live(self, channel):
+        def is_live(self, channel, default=False):
             Counting.n += 1
             return False
 
@@ -1520,3 +1520,71 @@ def test_restarted_part_is_listed_before_recording(tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
     watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch")
     assert listed and "stream_2.ts" in listed[0]
+
+
+# --- 14 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_latest_skips_vod_of_ongoing_stream(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from twitch_shorts import cli
+
+    v = SimpleNamespace(id="v1", created_at=datetime(2026, 10, 8, 20, tzinfo=timezone.utc), title="t")
+    assert cli._is_current_stream(v, {"started_at": "2026-10-08T20:00:30Z"})
+    assert not cli._is_current_stream(v, {"started_at": "2026-10-09T20:00:00Z"})
+
+
+def test_vod_choice_prefers_closest_start():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    t = datetime(2026, 10, 8, 20, tzinfo=timezone.utc).timestamp()
+    newer = SimpleNamespace(id="new", created_at=datetime.fromtimestamp(t + 360, timezone.utc), duration=3600)
+    older = SimpleNamespace(id="old", created_at=datetime.fromtimestamp(t, timezone.utc), duration=240)
+    helix = SimpleNamespace(get_user_id=lambda c: "u", get_recent_archives=lambda u, n: [newer, older])
+    assert watcher.find_stream_vod_info(helix, "ch", t + 10, t)[0] == "old"
+
+
+def test_shared_vod_is_limited_to_this_recording(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 500.0, 9999.0))
+    from twitch_shorts.models import Highlight
+    monkeypatch.setattr(watcher, "_highlights_of_vod",
+                        lambda *a: [Highlight(start=10, end=40, peak=20, score=1.0, output_path="a.mp4")])
+    seen = []
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a: seen.append(a[-1]) or [])
+    watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False)
+    start, end = seen[0]
+    assert start == 500.0 and 590 <= end <= 610  # 録画は約 100 秒
+
+
+def test_live_check_error_counts_as_live_for_leftovers(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    checker = watcher.LiveChecker(cfg)
+
+    def boom(channel):
+        raise RuntimeError("timeout")
+
+    monkeypatch.setattr(watcher, "is_live_via_ytdlp", boom)
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: pytest.fail("配信中かもしれないのに処理した"))
+    watcher.process_leftovers(cfg, "yuuki_ftw", checker=checker)
+
+
+def test_recorder_messages_go_to_a_file(tmp_path, monkeypatch):
+    import subprocess
+
+    from twitch_shorts import download
+
+    monkeypatch.setattr(download.shutil, "which", lambda n: None)
+    seen = {}
+
+    class P:
+        def __init__(self, cmd, stdout=None, stderr=None):
+            seen["stderr"] = stderr
+
+    monkeypatch.setattr(download.subprocess, "Popen", P)
+    proc = download.start_live_recording("ch", tmp_path / "stream.ts", "yt-dlp")
+    assert seen["stderr"] is not subprocess.PIPE and proc.log_path == tmp_path / "stream.log"
+    proc.log_path.write_bytes(b"error: 403")
+    assert download.recorder_log_tail(proc) == "error: 403"

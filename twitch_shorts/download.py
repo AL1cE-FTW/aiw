@@ -103,4 +103,18 @@ def start_live_recording(channel: str, out_path: str | Path, recorder: str = "au
         cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-part", "--hls-use-mpegts",
                "-f", quality, "-o", out_path, channel_url(channel)]
     log.info("録画開始: %s", " ".join(cmd))
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # 録画ツールのメッセージはファイルに書き出す (パイプのままだと、読まずにいると溜まって録画が止まるため)
+    log_path = Path(out_path).with_suffix(".log")
+    with open(log_path, "ab") as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err)
+    proc.log_path = log_path
+    return proc
+
+
+def recorder_log_tail(proc, size: int = 500) -> str:
+    """録画ツールのメッセージの末尾 (録画が止まった理由を調べるため)。"""
+    path = getattr(proc, "log_path", None)
+    try:
+        return Path(path).read_bytes()[-size:].decode(errors="replace") if path else ""
+    except OSError:
+        return ""
