@@ -210,14 +210,10 @@ def process(
             continue
         h.output_path = str(out)
 
-    if clip_vod:
-        # 前回までの逐次処理で VOD が見つかっていなかった分にも、リンクとクリップを付ける
-        for e in exclude:
-            if not e.vod_url:
-                e.vod_url = vod_timestamp_url(clip_vod[0], e.start + clip_vod[1])
-    pending = selected + [e for e in exclude if e.output_path and not e.twitch_clip]
-    if cfg.clips.enabled and clip_vod and pending and not dry_run:
-        _make_twitch_clips(cfg, pending, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
+    # Twitch クリップは書き出せたショートの場面だけ作る (dry-run では作らない)
+    rendered = [h for h in selected if h.output_path]
+    if cfg.clips.enabled and clip_vod and rendered and not dry_run:
+        _make_twitch_clips(cfg, rendered, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
                            owner=channel if clip_owner is None else clip_owner)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
     try:
@@ -231,8 +227,7 @@ def process(
         from .schedule import add_to_schedule
 
         try:
-            # 前回までの分は追加せず、後から作れた Twitch クリップの URL だけ予定表に反映する
-            for e in add_to_schedule(cfg, selected, channel, update_only=exclude):
+            for e in add_to_schedule(cfg, selected, channel):
                 log.info("投稿予定: %s  %s", e["publish_at"][:16].replace("T", " "), e["title"])
         except (ValueError, KeyError, OSError) as e:  # 設定ミスで書き出し済みの結果を失わないように
             log.warning("投稿予定表に追加できませんでした ([publish] の設定を確認してください): %s", e)

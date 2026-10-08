@@ -378,21 +378,6 @@ def test_find_stream_vod_back_to_back_streams():
                                    user_id="42") is None
 
 
-def test_earlier_highlights_get_clips_once_vod_is_found(make_stream, tmp_path, monkeypatch):
-    from twitch_shorts import twitch_clips
-    from twitch_shorts.pipeline import LocalSource, process
-
-    cfg, video, chat = _clip_setup(tmp_path, make_stream)
-    made = []
-    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod",
-                        lambda self, v, e, d, t="": made.append(e) or {"id": "C", "edit_url": f"https://clips.twitch.tv/{e}"})
-    earlier = Highlight(start=5, end=30, peak=20, score=9, title="前半", output_path="/x/early.mp4")
-    process(cfg, LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0), channel="yuuki_ftw",
-            exclude=[earlier])
-    assert earlier.twitch_clip and earlier.vod_url.endswith("t=0h0m5s")
-    assert len(made) == 2
-
-
 def test_clip_offset_never_below_duration_and_other_400_is_not_retried(tmp_path):
     _token(tmp_path)
     calls = []
@@ -531,18 +516,6 @@ def test_clips_need_scope_for_every_command(make_stream, tmp_path, monkeypatch):
     process(cfg, LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0), channel="yuuki_ftw")
 
 
-def test_schedule_picks_up_clip_created_later(tmp_path):
-    from twitch_shorts.schedule import add_to_schedule, load_schedule
-
-    cfg = Config(output_dir=str(tmp_path / "out"))
-    h = Highlight(start=0, end=30, peak=5, score=1, title="a", output_path="/x/a.mp4")
-    add_to_schedule(cfg, [h])
-    h.twitch_clip = "https://clips.twitch.tv/late"
-    add_to_schedule(cfg, [h])
-    [e] = load_schedule(cfg)
-    assert e["twitch_clip"] == "https://clips.twitch.tv/late"
-
-
 def test_doctor_names_missing_ffprobe(monkeypatch):
     from twitch_shorts import doctor
 
@@ -669,19 +642,6 @@ def test_config_hashtags_are_normalized():
     _fill_post_text(cfg, h, "y")
     assert h.hashtags == ["#Shorts", "#Twitch切り抜き"]
 
-
-def test_schedule_does_not_readd_removed_entries(tmp_path):
-    from twitch_shorts.schedule import add_to_schedule, load_schedule
-
-    cfg = Config(output_dir=str(tmp_path / "out"))
-    old = Highlight(start=0, end=30, peak=5, score=1, title="old", output_path="/x/old.mp4")
-    new = Highlight(start=50, end=80, peak=60, score=2, title="new", output_path="/x/new.mp4")
-    add_to_schedule(cfg, [new], update_only=[old])
-    assert [e["title"] for e in load_schedule(cfg)] == ["new"]
-
-
-
-# --- 5 回目のレビュー指摘の回帰テスト ---------------------------------------
 
 def test_ctrl_c_before_any_data_still_exits(tmp_path, monkeypatch):
     class Proc:
@@ -862,7 +822,7 @@ def test_leftover_gives_up_after_two_attempts(tmp_path, monkeypatch):
     session.mkdir(parents=True)
     (session / "stream.ts").write_bytes(b"not a video")
     runs = []
-    monkeypatch.setattr(watcher, "_run", lambda *a, **k: runs.append(1) or [])
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: runs.append(1) or [])
     monkeypatch.setattr(watcher, "_mark", lambda *a: None)  # 処理に失敗し続ける想定
     for _ in range(4):
         watcher.process_leftovers(cfg, "yuuki_ftw")
@@ -933,7 +893,7 @@ def test_auth_failure_during_batch_stops_with_login_hint(tmp_path, caplog):
 def test_failed_final_pass_is_not_marked_and_dry_run_never_marks(make_stream, tmp_path, monkeypatch):
     cfg, session = _session(tmp_path, make_stream)
     run_dir = tmp_path / "out" / "yuuki_ftw" / session.name
-    monkeypatch.setattr(watcher, "_run", lambda *a, **k: None)  # 処理に失敗
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: None)  # 処理に失敗
     watcher._final_pass(cfg, "yuuki_ftw", None, 0.0, None, session, run_dir, False)
     assert not (session / "processed").exists()
     monkeypatch.undo()
@@ -951,7 +911,7 @@ def test_legacy_sessions_with_output_are_not_reprocessed(tmp_path, monkeypatch):
     run_dir = tmp_path / "out" / "yuuki_ftw" / "old"
     run_dir.mkdir(parents=True)
     (run_dir / "highlights.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(watcher, "_run", lambda *a, **k: pytest.fail("処理済みの古い録画を処理した"))
+    monkeypatch.setattr(watcher, "_run_from_recording", lambda *a, **k: pytest.fail("処理済みの古い録画を処理した"))
     watcher.process_leftovers(cfg, "yuuki_ftw")
 
 
@@ -976,16 +936,34 @@ def test_one_failed_render_does_not_abort_the_rest(make_stream, tmp_path, monkey
     assert [bool(h.output_path) for h in r.highlights] == [False, True]
 
 
-def test_recorder_drop_while_still_live_defers_final_pass(tmp_path, monkeypatch):
+def test_stop_request_is_seen_while_waiting():
+    watcher._STOP.clear()
+    watcher._STOP.set()
+    with pytest.raises(KeyboardInterrupt):
+        watcher._sleep_checking_stop(5)
+    watcher._STOP.clear()
+
+
+
+# --- 8 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_recorder_restarts_in_same_session_while_still_live(tmp_path, monkeypatch):
+    starts = []
+
     class Proc:
-        returncode = 1
+        returncode = 0
         stderr = None
 
         def poll(self):
-            return 1
+            return 0
 
         def wait(self, timeout=None):
-            return 1
+            return 0
+
+    def fake_rec(c, out, r, q):
+        out.write_bytes(b"data")
+        starts.append(out.name)
+        return Proc()
 
     class FakeChat:
         def __init__(self, channel, out_path, *a):
@@ -997,31 +975,45 @@ def test_recorder_drop_while_still_live_defers_final_pass(tmp_path, monkeypatch)
         def stop(self):
             pass
 
+    lives = iter([True, True, True, False])  # 1 回目の終了時は配信中 (3 回確認)、2 回目は終了
+
     class Helix:
         def get_stream(self, login):
-            return {"viewer_count": 1}
+            return None
 
         def is_live(self, login):
-            return True
+            return next(lives)
 
-    def fake_rec(c, out, r, q):
-        out.write_bytes(b"data")
-        return Proc()
-
+    finals = []
     monkeypatch.setattr(watcher, "start_live_recording", fake_rec)
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
-    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: pytest.fail("配信中に最終処理をした"))
-    cfg = Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w"))
-    watcher.record_and_process(cfg, "ch", helix=Helix())
-    [session] = list((tmp_path / "w" / "ch").glob("*/"))
-    assert (session / "continued").exists()
+    monkeypatch.setattr(watcher, "_sleep_checking_stop", lambda s: None)
+    monkeypatch.setattr(watcher, "_final_pass", lambda cfg, ch, h, st, ss, session_dir, *a: finals.append(
+        [p.name for p, _ in watcher._load_parts(session_dir)]) or [])
+    watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
+                               helix=Helix())
+    assert starts == ["stream.ts", "stream_2.ts"]
+    assert finals == [["stream.ts", "stream_2.ts"]]  # 最終処理は 1 回、両方の録画を対象に
 
 
-def test_stop_waits_for_background_work():
-    watcher._STOP.clear()
-    with watcher._busy():
-        watcher._STOP.set()
-        watcher._sleep_checking_stop(0.01)  # 裏で処理中なのでまだ止まらない
-    with pytest.raises(KeyboardInterrupt):
-        watcher._sleep_checking_stop(5)
-    watcher._STOP.clear()
+def test_vod_fetch_failure_falls_back_to_recording(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import download
+
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(download, "download_audio", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(download, "download_section", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(watcher, "find_stream_vod", lambda *a, **k: ("v1", 0.0))
+    out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session,
+                              tmp_path / "out" / "yuuki_ftw" / session.name, False)
+    assert out and all(h.output_path.endswith(".mp4") for h in out)
+    assert (session / "processed").exists()
+
+
+def test_clips_only_for_rendered_shorts(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import pipeline, twitch_clips
+
+    cfg, video, chat = _clip_setup(tmp_path, make_stream)
+    monkeypatch.setattr(pipeline, "render_highlight", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(twitch_clips.ClipCreator, "from_vod", lambda *a, **k: pytest.fail("書き出せていない場面のクリップ"))
+    pipeline.process(cfg, pipeline.LocalSource(str(video)), chat, tmp_path / "o", clip_vod=("v1", 0.0),
+                     channel="yuuki_ftw")

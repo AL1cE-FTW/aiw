@@ -1,19 +1,28 @@
-"""チャンネルを監視し、配信が始まったら録画とチャット記録を行い、自動でショート動画を作る。"""
+"""チャンネルを監視し、配信が始まったら録画とチャット記録を行い、自動でショート動画を作る。
+
+1 回の配信 = 1 つの「セッション」(work/<チャンネル>/<日時>/):
+  - 録画 (stream.ts。録画が途切れても配信が続いていれば stream_2.ts … と録り直す)
+  - チャット (chat.jsonl)・同時視聴者数 (viewers.jsonl)。時刻はどちらも録画開始からの経過秒
+  - parts.json: 各録画ファイルが録画開始から何秒目に始まったか
+配信が終わったら、その配信の VOD から正式版を作る (VOD が無ければ録画から)。
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from .chat import LiveChatRecorder, load_chat
 from .config import Config
 from .download import is_live_via_ytdlp, start_live_recording
-from .models import Highlight
+from .models import ChatMessage, Highlight, ViewerSample
 from .pipeline import LocalSource, process
 from .viewers import ViewerRecorder, load_viewers
 
@@ -21,6 +30,11 @@ log = logging.getLogger(__name__)
 
 # 録画中ファイルの末尾付近は書き込み途中なので、この秒数ぶん手前までを処理対象にする
 LIVE_TAIL_MARGIN = 45.0
+# 録画が途切れたときに録り直す最大回数と、配信が続いているか確かめる回数・間隔
+MAX_RECORDER_RESTARTS = 5
+LIVE_RECHECKS = 3
+LIVE_RECHECK_SECONDS = 20.0
+MAX_LEFTOVER_ATTEMPTS = 2
 
 
 class LiveChecker:
@@ -41,6 +55,72 @@ class LiveChecker:
             return False
 
 
+# ---------------------------------------------------------------------------
+# 停止の扱い
+# ---------------------------------------------------------------------------
+
+# 停止の指示 (SIGTERM など) を受けたか
+_STOP = threading.Event()
+# 本体 (メインスレッド) が書き出しなどの処理中か。処理中に停止の指示を受けたら、終わってから止まる
+_MAIN_BUSY = threading.Event()
+# 前回の残りを処理する裏のスレッド
+_BACKGROUND: list[threading.Thread] = []
+
+
+@contextmanager
+def _busy():
+    """この間は停止の指示を受けても処理を中断しない (書き出し途中で止まると成果物が残らないため)。"""
+    nested = _MAIN_BUSY.is_set()
+    _MAIN_BUSY.set()
+    try:
+        yield
+    finally:
+        if not nested:
+            _MAIN_BUSY.clear()
+
+
+def _stop_on_terminate() -> None:
+    """サービスの停止や PC のシャットダウン (SIGTERM / Windows の Ctrl+Break) を受けたら止まる。
+
+    録画中・待機中なら Ctrl+C と同じく、ここまでの録画を処理して終了する。
+    本体が処理中なら、その処理が終わってから終了する。
+    """
+    def handler(signum, frame):
+        _STOP.set()
+        if _MAIN_BUSY.is_set():
+            log.info("停止の指示を受けました。いまの処理が終わったら終了します")
+            return
+        raise KeyboardInterrupt
+
+    for name in ("SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):  # メインスレッド以外など
+                pass
+
+
+def _sleep_checking_stop(seconds: float) -> None:
+    """待っている間に停止の指示があれば止まる。"""
+    deadline = time.time() + seconds
+    while True:
+        if _STOP.is_set():
+            raise KeyboardInterrupt
+        left = deadline - time.time()
+        if left <= 0:
+            return
+        time.sleep(min(1.0, left))
+
+
+def _wait_background() -> None:
+    """終了する前に、裏で処理中の前回の残りが終わるのを待つ (途中で止めると無駄になるため)。"""
+    for t in _BACKGROUND:
+        if t.is_alive():
+            log.info("前回の残りの処理が終わるのを待っています…")
+            t.join()
+
+
 def wait_until_live(cfg: Config, channel: str, checker: LiveChecker | None = None) -> None:
     checker = checker or LiveChecker(cfg)
     logged = False
@@ -51,17 +131,47 @@ def wait_until_live(cfg: Config, channel: str, checker: LiveChecker | None = Non
         _sleep_checking_stop(cfg.watch.poll_interval)
 
 
-def _sleep_checking_stop(seconds: float) -> None:
-    """待っている間に停止の指示があり、裏の処理も終わっていれば止まる。"""
-    deadline = time.time() + seconds
-    while True:
-        if _STOP.is_set() and not _busy_count():
-            raise KeyboardInterrupt
-        left = deadline - time.time()
-        if left <= 0:
-            return
-        time.sleep(min(1.0, left))
+# ---------------------------------------------------------------------------
+# セッションのデータ
+# ---------------------------------------------------------------------------
 
+def _mark(session_dir: Path, name: str) -> None:
+    try:
+        (session_dir / name).write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _save_parts(session_dir: Path, parts: list[tuple[Path, float]]) -> None:
+    data = [{"file": p.name, "offset": round(o, 2)} for p, o in parts]
+    (session_dir / "parts.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def _load_parts(session_dir: Path) -> list[tuple[Path, float]]:
+    """録画ファイルと、それが録画開始から何秒目に始まったか。中身の無いファイルは除く。"""
+    parts = [(session_dir / "stream.ts", 0.0)]
+    try:
+        data = json.loads((session_dir / "parts.json").read_text(encoding="utf-8"))
+        parts = [(session_dir / d["file"], float(d["offset"])) for d in data]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return [(p, o) for p, o in parts if p.exists() and p.stat().st_size > 0]
+
+
+def _load_signals(session_dir: Path, shift: float = 0.0) -> tuple[list[ChatMessage], list[ViewerSample] | None]:
+    """セッションのチャットと視聴者数を、時刻を shift 秒ずらして読む。"""
+    chat_path, viewers_path = session_dir / "chat.jsonl", session_dir / "viewers.jsonl"
+    chat = load_chat(chat_path) if chat_path.exists() and chat_path.stat().st_size else []
+    viewers = load_viewers(viewers_path) if viewers_path.exists() and viewers_path.stat().st_size else None
+    if shift:
+        chat = [replace(m, offset=m.offset + shift) for m in chat]
+        viewers = [replace(v, offset=v.offset + shift) for v in viewers] if viewers else None
+    return chat, viewers
+
+
+# ---------------------------------------------------------------------------
+# 録画
+# ---------------------------------------------------------------------------
 
 def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = False) -> list[Highlight]:
     """1 回分の配信を録画し、ショート動画を作る。配信が終わったら戻る。
@@ -73,11 +183,11 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     session_dir = Path(cfg.work_dir) / channel / stamp
     session_dir.mkdir(parents=True, exist_ok=True)
     run_dir = Path(cfg.output_dir) / channel / stamp
-    video_path = session_dir / "stream.ts"
     chat_path = session_dir / "chat.jsonl"
-    viewers_path = session_dir / "viewers.jsonl"
 
-    proc = start_live_recording(channel, video_path, cfg.watch.recorder, cfg.watch.quality)
+    parts = [(session_dir / "stream.ts", 0.0)]
+    _save_parts(session_dir, parts)
+    proc = start_live_recording(channel, parts[0][0], cfg.watch.recorder, cfg.watch.quality)
     start_time = time.time()
     chat_rec = LiveChatRecorder(channel, chat_path, start_time, cfg.twitch.irc_oauth_token, cfg.twitch.irc_nick)
     chat_rec.start()
@@ -85,28 +195,36 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     stream_started = _stream_started_at(helix, channel)
     viewer_rec = None
     if helix is not None:
-        viewer_rec = ViewerRecorder(helix, channel, viewers_path, start_time, cfg.watch.viewer_poll_interval)
+        viewer_rec = ViewerRecorder(helix, channel, session_dir / "viewers.jsonl", start_time,
+                                    cfg.watch.viewer_poll_interval)
         viewer_rec.start()
     else:
         log.info("Twitch API の認証情報が無いため、同時視聴者数は記録しません")
-    log.info("録画中: %s / チャット: %s", video_path, chat_path)
+    log.info("録画中: %s / チャット: %s", parts[0][0], chat_path)
 
-    done: list[Highlight] = []
+    previews: list[Highlight] = []
     interrupted = False
     next_run = start_time + cfg.watch.rolling_minutes * 60
     try:
-        while proc.poll() is None:
-            time.sleep(5)
-            if cfg.watch.rolling_minutes > 0 and time.time() >= next_run and video_path.exists():
-                next_run = time.time() + cfg.watch.rolling_minutes * 60
-                elapsed = time.time() - start_time
-                # 配信中は録画からプレビューを作る (live/ に保存。投稿予定表と Twitch クリップは、
-                # 広告が入らず時刻も正確な配信後の VOD から作る正式版だけ)
-                with _busy():
-                    done += _run(cfg, channel, video_path, chat_path, viewers_path, run_dir / "live", done,
-                                 elapsed - LIVE_TAIL_MARGIN, None, dry_run, publish=False) or []
+        restarts = 0
+        while True:
+            while proc.poll() is None:
+                time.sleep(5)
                 if _STOP.is_set():
                     raise KeyboardInterrupt
+                if cfg.watch.rolling_minutes > 0 and time.time() >= next_run:
+                    next_run = time.time() + cfg.watch.rolling_minutes * 60
+                    previews += _preview(cfg, channel, session_dir, parts[-1], run_dir, previews,
+                                         time.time() - start_time, dry_run)
+            # 録画が終わった: 配信が終わったのか、録画だけが途切れたのか確かめる
+            if restarts >= MAX_RECORDER_RESTARTS or not _still_live(helix, channel):
+                break
+            restarts += 1
+            part = session_dir / f"stream_{len(parts) + 1}.ts"
+            parts.append((part, time.time() - start_time))
+            _save_parts(session_dir, parts)
+            log.warning("録画が途切れましたが配信は続いています。録り直します (%s)", part.name)
+            proc = start_live_recording(channel, part, cfg.watch.recorder, cfg.watch.quality)
     except KeyboardInterrupt:
         log.info("中断されました。録画を止めて、ここまでの分を処理してから終了します")
         proc.terminate()
@@ -122,41 +240,60 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
 
     if proc.returncode not in (0, None, -15) and proc.stderr:
         log.warning("録画プロセスの出力: %s", proc.stderr.read().decode(errors="replace")[-500:])
-    if not video_path.exists() or video_path.stat().st_size == 0:
+    if not _load_parts(session_dir):
         log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
         if interrupted:
             raise KeyboardInterrupt
-        return done
-    if not interrupted and helix is not None and _still_live(helix, channel):
-        # 録画だけが途切れた (配信は続いている)。次の録画の最終処理で VOD 全体から作るので、ここでは作らない
-        log.warning("録画が途切れましたが配信は続いています。配信が終わったあとにまとめて作ります")
-        _mark(session_dir, "continued")
-        return done
+        return previews
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
     with _busy():
-        done = _final_pass(cfg, channel, helix, start_time, stream_started, session_dir, run_dir, dry_run)
+        result = _final_pass(cfg, channel, helix, start_time, stream_started, session_dir, run_dir, dry_run)
     if interrupted or _STOP.is_set():
         # Ctrl+C / 停止の指示は「止める」意味なので、配信が続いていても次の録画は始めずに終了する
         raise KeyboardInterrupt
-    return done
+    return result
 
 
 def _still_live(helix, channel: str) -> bool:
-    try:
-        return bool(helix.is_live(channel))
-    except Exception:
+    """配信が続いているか。終了直後は API の反映が遅れることがあるので、何度か確かめる。"""
+    if helix is None:
         return False
+    for i in range(LIVE_RECHECKS):
+        try:
+            if not helix.is_live(channel):
+                return False
+        except Exception:
+            return False
+        if i < LIVE_RECHECKS - 1:
+            _sleep_checking_stop(LIVE_RECHECK_SECONDS)
+    return True
 
+
+def _preview(cfg: Config, channel: str, session_dir: Path, part: tuple[Path, float], run_dir: Path,
+             previews: list[Highlight], elapsed: float, dry_run: bool) -> list[Highlight]:
+    """配信中のプレビュー (live/ に保存。投稿予定表・Twitch クリップは配信後の正式版だけ)。"""
+    video, offset = part
+    if not video.exists():
+        return []
+    chat, viewers = _load_signals(session_dir, -offset)
+    with _busy():
+        result = _process_recording(cfg, channel, video, chat, viewers, run_dir / "live", previews,
+                                    elapsed - offset - LIVE_TAIL_MARGIN, dry_run, publish=False)
+    return result or []
+
+
+# ---------------------------------------------------------------------------
+# 最終処理
+# ---------------------------------------------------------------------------
 
 def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_started: float | None,
                 session_dir: Path, run_dir: Path, dry_run: bool) -> list[Highlight]:
     """配信終了後の最終処理 (正式版)。
 
     この配信の VOD が見つかれば VOD から作る: VOD には広告が入らず時刻も正確なので、ショートの切り出し位置と
-    Twitch クリップの位置が合う。見つからなければ (VOD を保存しない設定など) 録画から作る。
+    Twitch クリップの位置が合う。見つからない・作れない場合は録画から作る。
     最後まで処理できたときだけ "processed" の印を付ける (失敗したら次回の起動時にやり直す)。
     """
-    video, chat_path, viewers_path = session_dir / "stream.ts", session_dir / "chat.jsonl", session_dir / "viewers.jsonl"
     vod = None
     if helix is not None:
         try:
@@ -168,37 +305,65 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
         if vod is None:
             log.warning("この配信の VOD が見つからないため、録画から作ります (Twitch クリップは作りません。"
                         "Twitch の設定で「過去の配信を保存」を有効にすると作れます)")
-    result = _run_from_vod(cfg, channel, vod, chat_path, viewers_path, run_dir, dry_run) if vod else None
+    result = _run_from_vod(cfg, channel, vod, session_dir, run_dir, dry_run) if vod else None
     if result is None:
-        result = _run(cfg, channel, video, chat_path, viewers_path, run_dir, [], None, None, dry_run)
+        result = _run_from_recording(cfg, channel, session_dir, run_dir, dry_run)
     if result is not None and not dry_run:
         _mark(session_dir, "processed")
     return result or []
 
 
-def _run_from_vod(cfg: Config, channel: str, vod: tuple[str, float], chat_path: Path, viewers_path: Path,
-                  run_dir: Path, dry_run: bool) -> list[Highlight] | None:
-    """録画の時刻で記録したチャット・視聴者数を VOD の時刻に直し、VOD から作る。失敗したら None。"""
-    import shutil
-    from dataclasses import replace
+def _run_from_vod(cfg: Config, channel: str, vod: tuple[str, float], session_dir: Path, run_dir: Path,
+                  dry_run: bool) -> list[Highlight] | None:
+    """録画の時刻で記録したチャット・視聴者数を VOD の時刻に直し、VOD から作る。
 
+    VOD を取得できなかった (1 本も書き出せなかった) ら None を返し、録画から作り直してもらう。
+    """
     from .download import vod_url
     from .pipeline import VodSource
 
     vod_id, shift = vod
-    chat = load_chat(chat_path) if chat_path.exists() and chat_path.stat().st_size else []
-    viewers = load_viewers(viewers_path) if viewers_path.exists() and viewers_path.stat().st_size else None
-    chat = [replace(m, offset=m.offset + shift) for m in chat]
-    viewers = [replace(v, offset=v.offset + shift) for v in viewers] if viewers else None
-    work = Path(cfg.work_dir) / f"vod_{vod_id}"
-    # 配信中に途中までダウンロードした音声などが残っていると VOD の後半が欠けるので、作り直す
-    shutil.rmtree(work, ignore_errors=True)
+    chat, viewers = _load_signals(session_dir, shift)
+    # セッション専用の作業フォルダー (他のコマンドが使う work/vod_<id> の中身は消さない)
+    work = Path(cfg.work_dir) / f"vod_{vod_id}" / f"auto_{session_dir.name}"
     log.info("この配信の VOD (%s) から作ります", vod_id)
     try:
         result = process(cfg, VodSource(vod_url(vod_id), work, cfg.watch.quality), chat, run_dir,
                          channel=channel, viewers=viewers, clip_vod=(vod_id, 0.0), dry_run=dry_run)
     except Exception as e:
         log.warning("VOD から作れなかったため、録画から作ります: %s", e)
+        return None
+    if not dry_run and result.highlights and not any(h.output_path for h in result.highlights):
+        log.warning("VOD を取得できなかったため、録画から作ります")
+        return None
+    for h in result.highlights:
+        log.info("作成: %s  %s", h.output_path, h.title)
+    return result.highlights
+
+
+def _run_from_recording(cfg: Config, channel: str, session_dir: Path, run_dir: Path,
+                        dry_run: bool) -> list[Highlight] | None:
+    """録画ファイルから作る (録り直した分は part2/ … に分けて保存)。どれかが失敗したら None。"""
+    done: list[Highlight] = []
+    for i, (video, offset) in enumerate(_load_parts(session_dir)):
+        chat, viewers = _load_signals(session_dir, -offset)
+        out = run_dir if i == 0 else run_dir / f"part{i + 1}"
+        result = _process_recording(cfg, channel, video, chat, viewers, out, [], None, dry_run)
+        if result is None:
+            return None
+        done += result
+    return done
+
+
+def _process_recording(cfg: Config, channel: str, video: Path, chat: list[ChatMessage],
+                       viewers: list[ViewerSample] | None, run_dir: Path, exclude: list[Highlight],
+                       available_until: float | None, dry_run: bool, publish: bool = True) -> list[Highlight] | None:
+    """録画ファイル 1 本から作る。失敗したら None。"""
+    try:
+        result = process(cfg, LocalSource(str(video)), chat, run_dir, channel=channel, exclude=exclude,
+                         available_until=available_until, viewers=viewers, dry_run=dry_run, publish=publish)
+    except Exception as e:
+        log.warning("処理に失敗しました: %s", e)
         return None
     for h in result.highlights:
         log.info("作成: %s  %s", h.output_path, h.title)
@@ -240,97 +405,23 @@ def find_stream_vod(helix, channel: str, record_start: float, stream_started: fl
     return None
 
 
-def _run(cfg: Config, channel: str, video: Path, chat_path: Path, viewers_path: Path, run_dir: Path,
-         done: list[Highlight], available_until: float | None,
-         clip_vod: tuple[str, float] | None = None, dry_run: bool = False,
-         publish: bool = True) -> list[Highlight] | None:
-    """録画から作る。失敗したら None。"""
-    chat = load_chat(chat_path) if chat_path.exists() and chat_path.stat().st_size else []
-    viewers = load_viewers(viewers_path) if viewers_path.exists() and viewers_path.stat().st_size else None
-    try:
-        result = process(
-            cfg, LocalSource(str(video)), chat, run_dir, channel=channel,
-            exclude=done, available_until=available_until, viewers=viewers, clip_vod=clip_vod,
-            dry_run=dry_run, publish=publish,
-        )
-    except Exception as e:
-        log.warning("処理に失敗しました: %s", e)
-        return None
-    for h in result.highlights:
-        log.info("作成: %s  %s", h.output_path, h.title)
-    return result.highlights
-
-
-# 停止の指示 (SIGTERM など) を受けたか。処理中に受けた場合は処理を終えてから止まる
-_STOP = threading.Event()
-_BUSY_LOCK = threading.Lock()
-_BUSY = [0]  # 処理中の数 (本体と、前回の残りを処理する裏のスレッド)
-
-
-def _busy_count() -> int:
-    with _BUSY_LOCK:
-        return _BUSY[0]
-
-
-@contextmanager
-def _busy():
-    """この間は停止の指示を受けても処理を中断しない (書き出し途中で止まると成果物が残らないため)。"""
-    with _BUSY_LOCK:
-        _BUSY[0] += 1
-    try:
-        yield
-    finally:
-        with _BUSY_LOCK:
-            _BUSY[0] -= 1
-
-
-def _stop_on_terminate() -> None:
-    """サービスの停止や PC のシャットダウン (SIGTERM / Windows の Ctrl+Break) を受けたら止まる。
-
-    録画中・待機中なら Ctrl+C と同じく、ここまでの録画を処理して終了する。
-    処理中なら、その処理が終わってから終了する。
-    """
-    def handler(signum, frame):
-        _STOP.set()
-        if _busy_count():
-            log.info("停止の指示を受けました。いまの処理が終わったら終了します")
-            return
-        raise KeyboardInterrupt
-
-    for name in ("SIGTERM", "SIGBREAK"):
-        sig = getattr(signal, name, None)
-        if sig is not None:
-            try:
-                signal.signal(sig, handler)
-            except (ValueError, OSError):  # メインスレッド以外など
-                pass
-
-
-MAX_LEFTOVER_ATTEMPTS = 2
-
-
-def _mark(session_dir: Path, name: str) -> None:
-    try:
-        (session_dir / name).write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
-    except OSError:
-        pass
-
+# ---------------------------------------------------------------------------
+# 前回の残り
+# ---------------------------------------------------------------------------
 
 def process_leftovers(cfg: Config, channel: str, dry_run: bool = False) -> None:
-    """前回、最後まで処理する前に止まってしまった録画 (停電・強制終了・処理の失敗など) を処理する。
+    """前回、最後まで処理する前に止まってしまった録画 (停電・強制終了・処理の失敗など) を録画から処理する。
 
-    対象は "processed" の印が無く、正式版の結果 (highlights.json) も無い録画。録画が途切れて次の録画で
-    まとめて作る分 ("continued") は対象外。壊れた録画で毎回失敗し続けないよう、試すのは 2 回まで。
+    対象は "processed" の印が無く、正式版の結果 (highlights.json) も無い録画。
+    壊れた録画で毎回失敗し続けないよう、試すのは 2 回まで。
     """
     base = Path(cfg.work_dir) / channel
     for session_dir in sorted(base.glob("*/")) if base.exists() else []:
         if _STOP.is_set():
             return
-        video = session_dir / "stream.ts"
         run_dir = Path(cfg.output_dir) / channel / session_dir.name
-        if any((session_dir / m).exists() for m in ("processed", "continued")) \
-                or (run_dir / "highlights.json").exists() \
-                or not video.exists() or video.stat().st_size == 0:
+        if (session_dir / "processed").exists() or (run_dir / "highlights.json").exists() \
+                or not _load_parts(session_dir):
             continue
         attempts_file = session_dir / "attempts"
         try:
@@ -341,10 +432,8 @@ def process_leftovers(cfg: Config, channel: str, dry_run: bool = False) -> None:
             continue
         if not dry_run:
             attempts_file.write_text(str(attempts + 1), encoding="utf-8")
-        log.info("前回処理されなかった録画を処理します: %s", video)
-        with _busy():
-            result = _run(cfg, channel, video, session_dir / "chat.jsonl", session_dir / "viewers.jsonl",
-                          run_dir, [], None, None, dry_run)
+        log.info("前回処理されなかった録画を処理します: %s", session_dir)
+        result = _run_from_recording(cfg, channel, session_dir, run_dir, dry_run)
         if result is not None and not dry_run:
             _mark(session_dir, "processed")
 
@@ -352,14 +441,18 @@ def process_leftovers(cfg: Config, channel: str, dry_run: bool = False) -> None:
 def watch(cfg: Config, channel: str, once: bool = False, dry_run: bool = False) -> None:
     _stop_on_terminate()
     # 前回の残りは裏で処理する (その間に配信が始まっても録画を始められるように)
-    threading.Thread(target=process_leftovers, args=(cfg, channel, dry_run), daemon=True,
-                     name="leftovers").start()
+    t = threading.Thread(target=process_leftovers, args=(cfg, channel, dry_run), daemon=True, name="leftovers")
+    _BACKGROUND.append(t)
+    t.start()
     checker = LiveChecker(cfg)
-    while True:
-        wait_until_live(cfg, channel, checker)
-        log.info("%s が配信を開始しました", channel)
-        record_and_process(cfg, channel, checker.helix, dry_run=dry_run)
-        if once:
-            return
-        # 配信終了直後の再接続などで即座に再録画しないよう少し待つ
-        time.sleep(cfg.watch.poll_interval)
+    try:
+        while True:
+            wait_until_live(cfg, channel, checker)
+            log.info("%s が配信を開始しました", channel)
+            record_and_process(cfg, channel, checker.helix, dry_run=dry_run)
+            if once:
+                return
+            # 配信終了直後の再接続などで即座に再録画しないよう少し待つ
+            _sleep_checking_stop(cfg.watch.poll_interval)
+    finally:
+        _wait_background()
