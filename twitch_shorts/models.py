@@ -6,8 +6,11 @@ from dataclasses import asdict, dataclass, field
 
 
 def normalize_hashtag(tag: str) -> str:
-    """"#タグ" の形にそろえる (全角の ＃ や、# が無いものも)。空なら空文字。"""
-    t = str(tag).strip().lstrip("#＃").strip()
+    """"#タグ" の形にそろえる (全角の ＃ や、# が無いものも)。空なら空文字。
+
+    タグの途中に空白があるとそこでタグが切れてしまうので、空白は詰める ("#Apex Legends" → "#ApexLegends")。
+    """
+    t = "".join(str(tag).split()).lstrip("#＃")
     return f"#{t}" if t else ""
 
 

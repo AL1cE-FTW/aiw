@@ -176,6 +176,9 @@ def create_clips(creator: ClipCreator | None, vod_id: str, highlights: list[High
         except TwitchAuthError as e:  # トークンの更新に失敗 (パスワード変更などで無効になった)
             log.warning("Twitch クリップを作れませんでした。twitch-shorts login をやり直してください: %s", e)
             break
+        except Exception as e:  # その他の想定外のエラーでも残りのクリップは続ける
+            log.warning("Twitch クリップを作れませんでした (%s): %s", h.title, e)
+            continue
         # 視聴者に共有できる公開 URL と、配信者用の編集ページを分けて持つ
         h.twitch_clip = public_clip_url(clip["id"]) if clip.get("id") else clip.get("edit_url", "")
         h.twitch_clip_edit = clip.get("edit_url", "")

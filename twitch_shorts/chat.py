@@ -135,7 +135,12 @@ def load_chat(path: str | Path) -> list[ChatMessage]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         # 1 行 1 JSON の JSONL (記録中の停電などで壊れた行は飛ばす)
-        msgs = [ChatMessage.from_dict(d) for d in read_jsonl(raw) if "offset" in d]
+        msgs = []
+        for d in read_jsonl(raw):
+            try:
+                msgs.append(ChatMessage.from_dict(d))
+            except (KeyError, TypeError, ValueError):  # offset が無い・数値でない行は飛ばす
+                continue
         return sorted(msgs, key=lambda m: m.offset)
     if isinstance(data, dict) and "offset" in data:  # 1 件だけの JSONL
         return [ChatMessage.from_dict(data)]

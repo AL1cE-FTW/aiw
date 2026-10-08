@@ -689,12 +689,10 @@ def test_sigterm_is_treated_like_ctrl_c():
     try:
         watcher._stop_on_terminate()
         handler = signal.getsignal(signal.SIGTERM)
-        with pytest.raises(KeyboardInterrupt):
-            handler(signal.SIGTERM, None)  # 待機中・録画中はすぐ止める
-        watcher._STOP.clear()
-        with watcher._busy():
-            handler(signal.SIGTERM, None)  # 書き出し中は中断しない (終わったら止まる)
+        handler(signal.SIGTERM, None)  # その場では中断せず、印を付けるだけ
         assert watcher._STOP.is_set()
+        with pytest.raises(KeyboardInterrupt):
+            watcher._sleep_checking_stop(5)  # 待機中なら Ctrl+C と同じく止まる
     finally:
         signal.signal(signal.SIGTERM, old)
         watcher._STOP.clear()
@@ -1230,17 +1228,25 @@ def test_leftovers_wait_while_live(make_stream, tmp_path, monkeypatch):
     watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(True))
 
 
-def test_leftover_covered_by_another_session_is_skipped(make_stream, tmp_path, monkeypatch):
+def test_leftover_that_finished_vod_pass_is_only_marked(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    watcher._save_meta(session, start_time=1000.0, stream_started=900.0, vod_id="v1")
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: pytest.fail("作り終えた VOD をもう一度作った"))
+    watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
+    assert (session / "processed").exists()
+
+
+def test_leftover_sharing_vod_with_another_session_still_uses_its_chat(make_stream, tmp_path, monkeypatch):
     cfg, session = _session(tmp_path, make_stream)
     watcher._save_meta(session, start_time=1000.0, stream_started=900.0)
     other = session.parent / "20261008_210000"
     other.mkdir()
     watcher._save_meta(other, vod_id="v1")
     (other / "processed").write_text("x")
-    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 100.0, 9999.0))
-    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: pytest.fail("同じ VOD を二重に作った"))
+    calls = []
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: calls.append(a[5]) or [])
     watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
-    assert (session / "processed").exists()
+    assert calls == [session] and (session / "processed").exists()
 
 
 def test_leftover_uses_vod_first_when_meta_known(make_stream, tmp_path, monkeypatch):
@@ -1409,3 +1415,108 @@ def test_vod_work_dir_is_removed(make_stream, tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "process", fake_process)
     assert watcher._run_from_vod(cfg, "yuuki_ftw", ("v1", 0.0, 100.0), session, tmp_path / "o", False) is None
     assert not work.exists()
+
+
+# --- 13 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_completed_vod_is_recorded_for_latest(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts.fileutil import processed_vods
+
+    cfg, session = _session(tmp_path, make_stream)
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 9999.0))
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: [])
+    watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False, vod_complete=False)
+    assert processed_vods(cfg.work_dir) == set()  # 配信の途中で止めた分は、残りを latest で作れるように
+    watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False)
+    assert processed_vods(cfg.work_dir) == {"v1"}
+
+
+def test_highlights_of_vod_are_deduplicated(tmp_path):
+    import json as _json
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    a = {"start": 10.0, "end": 40.0, "peak": 20.0, "score": 1.0, "output_path": "a.mp4"}
+    b = {"start": 60.0, "end": 90.0, "peak": 70.0, "score": 1.0, "output_path": "b.mp4"}
+    for name, hs in (("s1", [a]), ("s2", [a, b])):  # s2 の結果には s1 の分も入っている
+        d = tmp_path / "work" / "yuuki_ftw" / name
+        d.mkdir(parents=True)
+        watcher._save_meta(d, vod_id="v1")
+        out = tmp_path / "out" / "yuuki_ftw" / name
+        out.mkdir(parents=True)
+        (out / "highlights.json").write_text(_json.dumps({"highlights": hs}), encoding="utf-8")
+    me = tmp_path / "work" / "yuuki_ftw" / "s3"
+    me.mkdir()
+    found = watcher._highlights_of_vod(cfg, "yuuki_ftw", "v1", me)
+    assert sorted(h.output_path for h in found) == ["a.mp4", "b.mp4"]
+
+
+def test_hashtags_with_spaces_are_joined():
+    from twitch_shorts.models import normalize_hashtag
+
+    assert normalize_hashtag(" ＃Apex Legends ") == "#ApexLegends"
+    assert normalize_hashtag("  ") == ""
+
+
+def test_chat_lines_with_bad_offset_are_skipped(tmp_path):
+    from twitch_shorts.chat import load_chat
+
+    p = tmp_path / "chat.jsonl"
+    p.write_text('{"offset": 1, "user": "a", "text": "x"}\n{"offset": null, "user": "b", "text": "y"}\n'
+                 '{"offset": [1], "user": "c", "text": "z"}\n', encoding="utf-8")
+    assert [m.user for m in load_chat(p)] == ["a"]
+
+
+def test_unexpected_clip_error_does_not_stop_the_batch():
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.twitch_clips import create_clips
+
+    class Creator:
+        n = 0
+
+        def from_vod(self, vod_id, end, duration, title):
+            Creator.n += 1
+            if Creator.n == 1:
+                raise TypeError("odd header")
+            return {"id": "C2", "edit_url": "e"}
+
+    hs = [Highlight(start=10, end=40, peak=20, score=2.0), Highlight(start=100, end=130, peak=110, score=1.0)]
+    create_clips(Creator(), "v1", hs)
+    assert Creator.n == 2 and hs[1].twitch_clip
+
+
+def test_restarted_part_is_listed_before_recording(tmp_path, monkeypatch):
+    class Proc:
+        returncode = 0
+        stderr = None
+
+        def __init__(self, n):
+            self.n = n
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+    listed = []
+    session_holder = []
+
+    def fake_start(channel, path, *a):
+        session_holder.append(path.parent)
+        if path.name != "stream.ts":
+            listed.append([d["file"] for d in json.loads((path.parent / "parts.json").read_text())])
+            raise RuntimeError("recorder missing")
+        path.write_bytes(b"x")
+        return Proc(len(session_holder))
+
+    monkeypatch.setattr(watcher, "start_live_recording", fake_start)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", lambda *a, **k: type("C", (), {
+        "start": lambda s: None, "stop": lambda s: None, "count": 0})())
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: True)
+    monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
+    watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch")
+    assert listed and "stream_2.ts" in listed[0]

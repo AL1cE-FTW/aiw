@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, load_config
-from .fileutil import file_lock, write_json_atomic
+from .fileutil import add_processed_vod, processed_vods
 
 log = logging.getLogger("twitch_shorts")
 
@@ -109,10 +109,9 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         return 2
     helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
     videos = helix.get_recent_archives(helix.get_user_id(args.channel), args.count)
-    state_path = Path(cfg.work_dir) / "processed_vods.json"
-    done = set(json.loads(state_path.read_text())) if state_path.exists() else set()
     for v in reversed(videos):
-        if v.id in done and not args.force:
+        # auto / watch で作った VOD もここに記録される
+        if v.id in processed_vods(cfg.work_dir) and not args.force:
             log.info("処理済みのためスキップ: %s %s", v.id, v.title)
             continue
         log.info("処理開始: %s %s", v.id, v.title)
@@ -120,10 +119,7 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         args.channel = args.channel.lower()
         cmd_vod(cfg, args)
         if not args.dry_run:
-            with file_lock(state_path):
-                latest = set(json.loads(state_path.read_text())) if state_path.exists() else set()
-                write_json_atomic(state_path, sorted(latest | done | {v.id}))
-            done.add(v.id)
+            add_processed_vod(cfg.work_dir, v.id)
     return 0
 
 

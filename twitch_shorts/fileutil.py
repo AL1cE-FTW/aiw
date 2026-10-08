@@ -33,6 +33,30 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
         raise
 
 
+def read_json(path: str | Path, default=None):
+    """JSON ファイルを読む。無い・読めない・壊れている場合は default を返す。"""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+# latest / auto で処理済みの VOD の ID の一覧 (work_dir 直下)
+PROCESSED_VODS = "processed_vods.json"
+
+
+def processed_vods(work_dir: str | Path) -> set[str]:
+    data = read_json(Path(work_dir) / PROCESSED_VODS, [])
+    return {str(v) for v in data} if isinstance(data, list) else set()
+
+
+def add_processed_vod(work_dir: str | Path, vod_id: str) -> None:
+    """処理済みの VOD を記録する (別のプロセスが同時に書き足していても消さない)。"""
+    path = Path(work_dir) / PROCESSED_VODS
+    with file_lock(path):
+        write_json_atomic(path, sorted(processed_vods(work_dir) | {vod_id}))
+
+
 def read_jsonl(text: str) -> list[dict]:
     """1 行 1 JSON のテキストを読む。記録中の停電などで壊れた行や、オブジェクトでない行は飛ばす。"""
     out = []
