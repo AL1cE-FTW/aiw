@@ -6,6 +6,8 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=%h/aiw
+# 仮想環境に入れた streamlink なども見つかるように
+Environment=PATH=%h/aiw/.venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/aiw/.venv/bin/twitch-shorts auto yuuki_ftw
 Restart=on-failure
 RestartSec=60

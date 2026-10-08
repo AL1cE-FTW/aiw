@@ -846,11 +846,11 @@ def _session(tmp_path, make_stream, name="20261008_200000"):
     return cfg, session
 
 
-def test_leftover_ignores_rolling_report_and_marks_processed(make_stream, tmp_path):
+def test_leftover_ignores_live_preview_and_marks_processed(make_stream, tmp_path):
     cfg, session = _session(tmp_path, make_stream)
     run_dir = tmp_path / "out" / "yuuki_ftw" / session.name
-    run_dir.mkdir(parents=True)
-    (run_dir / "highlights.json").write_text("{}", encoding="utf-8")  # 配信中の途中経過だけある
+    (run_dir / "live").mkdir(parents=True)
+    (run_dir / "live" / "highlights.json").write_text("{}", encoding="utf-8")  # 配信中のプレビューだけある
     watcher.process_leftovers(cfg, "yuuki_ftw")
     assert (session / "processed").exists()
     assert json.loads((run_dir / "highlights.json").read_text(encoding="utf-8"))["highlights"]
@@ -874,7 +874,7 @@ def test_final_pass_falls_back_to_recording_when_vod_fails(make_stream, tmp_path
     monkeypatch.setattr(watcher, "find_stream_vod", lambda *a, **k: ("v1", 10.0))
     monkeypatch.setattr(watcher, "_run_from_vod", lambda *a, **k: None)  # VOD のダウンロードに失敗
     out = watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session,
-                              tmp_path / "out" / "yuuki_ftw" / session.name, [], False)
+                              tmp_path / "out" / "yuuki_ftw" / session.name, False)
     assert out and out[0].output_path.endswith(".mp4")
     assert (session / "processed").exists()
 
@@ -925,3 +925,103 @@ def test_auth_failure_during_batch_stops_with_login_hint(tmp_path, caplog):
     hs = [Highlight(start=i * 100, end=i * 100 + 30, peak=i * 100 + 10, score=1) for i in range(3)]
     assert create_clips(Creator(), "v1", hs) == []
     assert "twitch-shorts login をやり直して" in caplog.text
+
+
+
+# --- 7 回目のレビュー指摘の回帰テスト ---------------------------------------
+
+def test_failed_final_pass_is_not_marked_and_dry_run_never_marks(make_stream, tmp_path, monkeypatch):
+    cfg, session = _session(tmp_path, make_stream)
+    run_dir = tmp_path / "out" / "yuuki_ftw" / session.name
+    monkeypatch.setattr(watcher, "_run", lambda *a, **k: None)  # 処理に失敗
+    watcher._final_pass(cfg, "yuuki_ftw", None, 0.0, None, session, run_dir, False)
+    assert not (session / "processed").exists()
+    monkeypatch.undo()
+    watcher._final_pass(cfg, "yuuki_ftw", None, 0.0, None, session, run_dir, True)  # dry-run
+    assert not (session / "processed").exists()
+    watcher.process_leftovers(cfg, "yuuki_ftw", dry_run=True)
+    assert not (session / "processed").exists() and not (session / "attempts").exists()
+
+
+def test_legacy_sessions_with_output_are_not_reprocessed(tmp_path, monkeypatch):
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    session = tmp_path / "work" / "yuuki_ftw" / "old"
+    session.mkdir(parents=True)
+    (session / "stream.ts").write_bytes(b"x")
+    run_dir = tmp_path / "out" / "yuuki_ftw" / "old"
+    run_dir.mkdir(parents=True)
+    (run_dir / "highlights.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(watcher, "_run", lambda *a, **k: pytest.fail("処理済みの古い録画を処理した"))
+    watcher.process_leftovers(cfg, "yuuki_ftw")
+
+
+def test_one_failed_render_does_not_abort_the_rest(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import pipeline
+    from twitch_shorts.chat import load_chat
+
+    video, chat_path = make_stream(duration=150, events=(40, 110))
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.render.width, cfg.render.height = 360, 640
+    real = pipeline.render_highlight
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("section download failed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(pipeline, "render_highlight", flaky)
+    r = pipeline.process(cfg, pipeline.LocalSource(str(video)), load_chat(chat_path), tmp_path / "o")
+    assert [bool(h.output_path) for h in r.highlights] == [False, True]
+
+
+def test_recorder_drop_while_still_live_defers_final_pass(tmp_path, monkeypatch):
+    class Proc:
+        returncode = 1
+        stderr = None
+
+        def poll(self):
+            return 1
+
+        def wait(self, timeout=None):
+            return 1
+
+    class FakeChat:
+        def __init__(self, channel, out_path, *a):
+            self.out_path, self.count = out_path, 0
+
+        def start(self):
+            self.out_path.write_text("", encoding="utf-8")
+
+        def stop(self):
+            pass
+
+    class Helix:
+        def get_stream(self, login):
+            return {"viewer_count": 1}
+
+        def is_live(self, login):
+            return True
+
+    def fake_rec(c, out, r, q):
+        out.write_bytes(b"data")
+        return Proc()
+
+    monkeypatch.setattr(watcher, "start_live_recording", fake_rec)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: pytest.fail("配信中に最終処理をした"))
+    cfg = Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w"))
+    watcher.record_and_process(cfg, "ch", helix=Helix())
+    [session] = list((tmp_path / "w" / "ch").glob("*/"))
+    assert (session / "continued").exists()
+
+
+def test_stop_waits_for_background_work():
+    watcher._STOP.clear()
+    with watcher._busy():
+        watcher._STOP.set()
+        watcher._sleep_checking_stop(0.01)  # 裏で処理中なのでまだ止まらない
+    with pytest.raises(KeyboardInterrupt):
+        watcher._sleep_checking_stop(5)
+    watcher._STOP.clear()

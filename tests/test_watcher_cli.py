@@ -50,7 +50,7 @@ def test_wait_until_live_polls(monkeypatch):
             return next(states)
 
     sleeps = []
-    monkeypatch.setattr(watcher.time, "sleep", sleeps.append)
+    monkeypatch.setattr(watcher, "_sleep_checking_stop", sleeps.append)
     cfg = Config()
     watcher.wait_until_live(cfg, "yuuki_ftw", Checker())
     assert sleeps == [cfg.watch.poll_interval] * 2

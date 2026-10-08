@@ -120,6 +120,7 @@ def process(
     viewers: list[ViewerSample] | None = None,
     clip_vod: tuple[str, float] | None = None,
     clip_owner: str | None = None,
+    publish: bool = True,
 ) -> RunResult:
     """ハイライトを検出し、ショート動画を ``run_dir`` に書き出す。
 
@@ -128,6 +129,7 @@ def process(
     clip_vod:         (VOD の ID, ハイライトの時刻を VOD 上の時刻にするために足す秒数)。
                       clips.enabled のとき、この VOD から Twitch の公式クリップを作る
     clip_owner:       VOD の持ち主のチャンネル名 (省略時は channel)。クリップを作れるかの判定に使う
+    publish:          False なら投稿予定表に載せない (配信中のプレビューなど)
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -197,11 +199,15 @@ def process(
             h.vod_url = vod_timestamp_url(clip_vod[0], h.start + clip_vod[1])
         if dry_run:
             continue
-        video, offset = source.video_for(h.start, h.end)
         out = run_dir / f"short_{i:02d}_{_hms(h.start)}.mp4"
         log.info("書き出し中: %s (%s〜%s) %s", out.name, _hms(h.start, ":"), _hms(h.end, ":"), h.title)
-        render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
-                         max_total=cfg.detect.max_duration)
+        try:
+            video, offset = source.video_for(h.start, h.end)
+            render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
+                             max_total=cfg.detect.max_duration)
+        except Exception as e:  # 1 本の失敗 (区間のダウンロード失敗など) で残りを止めない
+            log.warning("書き出しに失敗したため、この 1 本は飛ばします (%s): %s", out.name, e)
+            continue
         h.output_path = str(out)
 
     if clip_vod:
@@ -221,7 +227,7 @@ def process(
         log.info("確認ページ: %s", page)
     except OSError as e:
         log.warning("確認ページを作れませんでした: %s", e)
-    if cfg.publish.enabled and not dry_run:
+    if cfg.publish.enabled and publish and not dry_run:
         from .schedule import add_to_schedule
 
         try:
