@@ -163,11 +163,15 @@ def our_shorts(cfg: Config) -> list[dict]:
         data = read_json(hj, {})
         items_ = data.get("highlights", []) if isinstance(data, dict) else []
         for h in items_ if isinstance(items_, list) else []:
-            if isinstance(h, dict) and h.get("output_path") and h.get("title"):
+            if isinstance(h, dict) and isinstance(h.get("output_path"), str) and isinstance(h.get("title"), str) \
+                    and h["output_path"] and h["title"]:
                 items[h["output_path"]] = {"title": h["title"], "path": h["output_path"],
-                                           "signals": h.get("signals", {}), "hook": h.get("hook", ""),
+                                           "signals": h["signals"] if isinstance(h.get("signals"), dict) else {},
+                                           "hook": h.get("hook", ""),
                                            "duration": h.get("video_duration") or h.get("duration")}
     for e in load_schedule(cfg):
+        if not e["title"]:  # タイトルが無いと YouTube の結果と突き合わせられない
+            continue
         items.setdefault(e["path"], {"title": e["title"], "path": e["path"], "signals": e.get("signals", {}),
                                      "hook": e.get("hook", ""), "duration": e.get("duration")})
     return list(items.values())

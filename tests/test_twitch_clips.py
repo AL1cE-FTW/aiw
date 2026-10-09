@@ -1928,17 +1928,30 @@ def test_hand_edited_schedule_rows_are_skipped(tmp_path):
     assert "壊れた行" in rows and {"publish_at": "あした", "path": "b.mp4"} in rows  # 手で書いた行は消さない
 
 
-def test_schedule_rows_without_timezone_or_title_are_skipped(tmp_path):
+def test_schedule_rows_without_timezone_or_title_are_normalized(tmp_path):
     import json as _json
 
-    from twitch_shorts.schedule import load_schedule
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.schedule import add_to_schedule, load_schedule
 
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.publish.posts_per_day = 1
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "schedule.json").write_text(_json.dumps(
-        [{"publish_at": "2026-10-10T19:00:00", "path": "a.mp4", "title": "a"},
-         {"publish_at": "2026-10-10T19:00:00+09:00", "path": "b.mp4"}]), encoding="utf-8-sig")
-    assert load_schedule(cfg) == []
+        [{"publish_at": "2026-10-10T19:00:00", "path": "a.mp4", "title": "a"},  # 手で時刻を書き換えた
+         {"publish_at": "2026-10-11T19:00:00+09:00", "path": "b.mp4"}]), encoding="utf-8-sig")
+    rows = load_schedule(cfg)
+    assert [(e["path"], e["publish_at"], e["title"]) for e in rows] == [
+        ("a.mp4", "2026-10-10T19:00:00+09:00", "a"), ("b.mp4", "2026-10-11T19:00:00+09:00", "")]
+    # 手で書いた行の枠は空いていない扱い (二重に予約しない)
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    now = _dt(2026, 10, 10, 12, tzinfo=ZoneInfo(cfg.publish.timezone))
+    h = Highlight(start=10, end=40, peak=20, score=1.0, title="t", output_path=str(tmp_path / "c.mp4"))
+    [added] = add_to_schedule(cfg, [h], "ch", now)
+    assert added["publish_at"].startswith("2026-10-12T19:00")
+    saved = _json.loads((tmp_path / "out" / "schedule.json").read_text(encoding="utf-8"))
+    assert saved[0] == {"publish_at": "2026-10-10T19:00:00", "path": "a.mp4", "title": "a"}  # 元のまま
 
 
 def test_feedback_tolerates_bom_schedule(tmp_path):

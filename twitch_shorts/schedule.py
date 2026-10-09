@@ -27,19 +27,31 @@ def _paths(cfg: Config) -> tuple[Path, Path]:
 
 
 def load_schedule(cfg: Config) -> list[dict]:
-    """投稿予定表の有効な行 (手で編集して形の崩れた行は飛ばす)。"""
+    """投稿予定表の行 (形をそろえたもの。手で編集して読めなくなった行は飛ばす)。"""
     path, _ = _paths(cfg)
     data = read_json(path, [])
-    return [e for e in data if _valid_entry(e)] if isinstance(data, list) else []
+    tz = ZoneInfo(cfg.publish.timezone)
+    rows = [_normalize_entry(e, tz) for e in data] if isinstance(data, list) else []
+    return [e for e in rows if e is not None]
 
 
-def _valid_entry(e) -> bool:
-    if not isinstance(e, dict) or not isinstance(e.get("path"), str) or not isinstance(e.get("title"), str):
-        return False
+def _normalize_entry(e, tz: ZoneInfo) -> dict | None:
+    """行の形をそろえる。時差の無い日時は投稿のタイムゾーンの時刻とみなし、タイトルが無ければ空にする。
+    path や日時が読めない行は None。"""
+    if not isinstance(e, dict) or not isinstance(e.get("path"), str):
+        return None
     try:
-        return datetime.fromisoformat(e["publish_at"]).tzinfo is not None  # 時差の無い日時は比べられない
+        when = datetime.fromisoformat(e["publish_at"])
     except (KeyError, TypeError, ValueError):
-        return False
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=tz)
+    out = dict(e, publish_at=when.isoformat())
+    if not isinstance(out.get("title"), str):
+        out["title"] = ""
+    if not isinstance(out.get("signals"), dict):
+        out["signals"] = {}
+    return out
 
 
 def _slot_times(cfg: Config, day: date, tz: ZoneInfo) -> list[datetime]:
@@ -62,11 +74,13 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
                      now: datetime | None) -> list[dict]:
     tz = ZoneInfo(cfg.publish.timezone)
     now = (now or datetime.now(tz)).astimezone(tz)
-    # 壊れていれば別名に移して作り直す。形の崩れた行は計算には使わないが、消さずに書き戻す
+    # 壊れていれば別名に移して作り直す。読めない行は枠の計算には使わないが、消さずに書き戻す
     raw = read_list_for_update(_paths(cfg)[0])
-    entries = [e for e in raw if _valid_entry(e)]
-    invalid = [e for e in raw if not _valid_entry(e)]
-    known = {e["path"] for e in entries}
+    normalized = [(e, _normalize_entry(e, tz)) for e in raw]
+    entries = [n for _, n in normalized if n is not None]
+    invalid = [e for e, n in normalized if n is None]
+    known = {e["path"] for e in entries} | {e["path"] for e in invalid
+                                             if isinstance(e, dict) and isinstance(e.get("path"), str)}
     used = Counter(datetime.fromisoformat(e["publish_at"]).astimezone(tz).isoformat() for e in entries)
 
     added: list[dict] = []
@@ -101,10 +115,17 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
         entries.append(entry)
         added.append(entry)
 
-    entries.sort(key=lambda e: e["publish_at"])
+    def when(e: dict) -> datetime:
+        return datetime.fromisoformat(e["publish_at"])
+
+    entries.sort(key=when)
+    # JSON には既存の行を元のまま書き戻す (手で編集した値を書き換えない)
+    rows = [(when(n), e) for e, n in normalized if n is not None] + [(when(e), e) for e in added]
+    rows.sort(key=lambda r: r[0])
     json_path, csv_path = _paths(cfg)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(json_path, entries + invalid)  # 逐次処理のたびに書き換えるので、途中で止まっても壊れないように
+    # 逐次処理のたびに書き換えるので、途中で止まっても壊れないように
+    write_json_atomic(json_path, [e for _, e in rows] + invalid)
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=["publish_at", "title", "hook", "category", "description", "hashtags",
                                         "channel", "score", "duration", "path", "twitch_clip"],
