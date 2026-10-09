@@ -282,9 +282,11 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         log.warning("録画プロセスの出力: %s", recorder_log_tail(proc))
     if not _load_parts(session_dir):
         log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
-        if interrupted or _STOP.is_set():
-            raise KeyboardInterrupt
-        return [h for hs in previews.values() for h in hs]
+        if helix is None:  # VOD も探せないので作れない
+            if interrupted or _STOP.is_set():
+                raise KeyboardInterrupt
+            return [h for hs in previews.values() for h in hs]
+        log.info("記録したチャットと VOD から作ります")
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
     # 配信が終わっていれば VOD も完成している (途中で止めた場合は、残りを latest などで作れるよう完成扱いにしない)
     ended = not interrupted and not _STOP.is_set() and not _still_live(helix, channel, checker)
@@ -579,8 +581,10 @@ def process_leftovers(cfg: Config, channel: str, dry_run: bool = False, checker:
         run_dir = Path(cfg.output_dir) / channel / session_dir.name
         # parts.json が無いのは以前の版で作った録画 (その版で処理済み) なので対象にしない
         if (session_dir / "processed").exists() or (session_dir / "dry_run").exists() \
-                or not (session_dir / "parts.json").exists() or not _load_parts(session_dir):
+                or not (session_dir / "parts.json").exists():
             continue
+        if not _load_parts(session_dir) and (helix is None or not _load_meta(session_dir).get("start_time")):
+            continue  # 録画も無く、VOD も探せない
         attempts_file = session_dir / "attempts"
         try:
             attempts = int(attempts_file.read_text(encoding="utf-8").strip() or 0)

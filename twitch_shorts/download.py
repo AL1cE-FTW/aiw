@@ -76,15 +76,21 @@ def download_section(url: str, start: float, end: float, out_path: str | Path, q
 
 
 def is_live_via_ytdlp(channel: str) -> bool:
-    """API キー無しで配信中か調べる (オフラインだと yt-dlp がエラーを返す)。"""
+    """API キー無しで配信中か調べる (オフラインだと yt-dlp がエラーを返す)。
+
+    「オフライン」以外のエラー (通信の不調など) は例外のまま返す (呼び出し側で「分からない」として扱うため)。
+    """
     from yt_dlp.utils import DownloadError
 
     try:
         with _ydl({"skip_download": True}) as ydl:
             info = ydl.extract_info(channel_url(channel), download=False)
         return bool(info and info.get("is_live", True))
-    except DownloadError:
-        return False
+    except DownloadError as e:
+        msg = str(e).lower()
+        if "offline" in msg or "not currently live" in msg or "does not exist" in msg:
+            return False
+        raise
 
 
 def start_live_recording(channel: str, out_path: str | Path, recorder: str = "auto",

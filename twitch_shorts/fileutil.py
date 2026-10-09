@@ -23,7 +23,7 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False, indent=2))
         if not private:
-            os.chmod(tmp, 0o644)
+            os.chmod(tmp, 0o666 & ~_umask())  # 普通にファイルを作ったときと同じ権限にする
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -31,6 +31,12 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
         except OSError:
             pass
         raise
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def read_json(path: str | Path, default=None):

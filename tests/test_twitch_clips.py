@@ -1675,3 +1675,103 @@ def test_llm_hashtags_as_string_are_split():
     out = rerank_with_claude([Highlight(start=10, end=40, peak=20, score=1.0)], LLMConfig(), "ch", "", 15, 60,
                              client=client)
     assert out[0].hashtags == ["#apex", "#clutch"]
+
+
+# --- 16 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_empty_recording_still_uses_vod(tmp_path, monkeypatch):
+    class Proc:
+        returncode = 1
+        stderr = None
+
+        def poll(self):
+            return 1
+
+        def wait(self, timeout=None):
+            return 1
+
+        def terminate(self):
+            pass
+
+    monkeypatch.setattr(watcher, "start_live_recording", lambda c, path, *a: Proc())  # 何も録れない
+    monkeypatch.setattr(watcher, "LiveChatRecorder", lambda *a, **k: type("C", (), {
+        "start": lambda s: None, "stop": lambda s: None, "count": 0})())
+    monkeypatch.setattr(watcher, "ViewerRecorder", lambda *a, **k: type("V", (), {
+        "start": lambda s: None, "stop": lambda s: None})())
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: False)
+    monkeypatch.setattr(watcher, "_stream_started_at", lambda *a: None)
+    finals = []
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: finals.append(1) or [])
+    watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch",
+                               helix=object())
+    assert finals == [1]
+
+
+def test_ytdlp_network_error_is_not_offline(monkeypatch):
+    from yt_dlp.utils import DownloadError
+
+    from twitch_shorts import download
+
+    class Y:
+        def __init__(self, msg):
+            self.msg = msg
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, *a, **k):
+            raise DownloadError(self.msg)
+
+    monkeypatch.setattr(download, "_ydl", lambda opts: Y("ERROR: [twitch:stream] yuuki_ftw: The channel is not currently live"))
+    assert download.is_live_via_ytdlp("yuuki_ftw") is False
+    monkeypatch.setattr(download, "_ydl", lambda opts: Y("ERROR: Unable to download webpage: timed out"))
+    with pytest.raises(DownloadError):
+        download.is_live_via_ytdlp("yuuki_ftw")
+
+
+def test_broken_clip_registry_is_kept_aside(tmp_path):
+    from twitch_shorts.twitch_clips import _load_registry
+
+    reg = tmp_path / "twitch_clips.json"
+    reg.write_text("{broken", encoding="utf-8")
+    assert _load_registry(reg) == []
+    assert not reg.exists() and list(tmp_path.glob("twitch_clips.json.broken-*"))
+
+
+def test_registry_lock_timeout_does_not_crash(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.models import Highlight
+
+    @contextmanager
+    def busy(path, timeout=120.0):
+        raise TimeoutError("busy")
+        yield
+
+    monkeypatch.setattr(twitch_clips, "file_lock", busy)
+
+    class Creator:
+        def from_vod(self, *a):
+            pytest.fail("ロックを取れないのに作った")
+
+    out = twitch_clips.create_clips(Creator(), "v1", [Highlight(start=10, end=40, peak=20, score=1.0)],
+                                    registry=tmp_path / "r.json")
+    assert out == []
+
+
+def test_written_json_follows_umask(tmp_path):
+    import os
+    import stat
+
+    from twitch_shorts.fileutil import write_json_atomic
+
+    old = os.umask(0o077)
+    try:
+        write_json_atomic(tmp_path / "a.json", [])
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "a.json").stat().st_mode) == 0o600

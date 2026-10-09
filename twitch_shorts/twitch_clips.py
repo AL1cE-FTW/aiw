@@ -103,13 +103,25 @@ def clip_window(h: Highlight, shift: float = 0.0) -> tuple[int, float]:
     return normalize_window(end, duration)
 
 
+REGISTRY_LOCK_TIMEOUT = 900.0
+
+
 def _load_registry(path: Path | None) -> list[dict]:
     if not path or not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError:
         log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
+        return []
+    except json.JSONDecodeError:
+        # 壊れた記録は上書きで消さないよう、別名で残しておく
+        backup = path.with_name(f"{path.name}.broken-{int(time.time())}")
+        try:
+            path.replace(backup)
+            log.warning("クリップの記録 (%s) が壊れているため、%s に移して新しく記録します", path, backup.name)
+        except OSError:
+            log.warning("クリップの記録 (%s) が壊れているため、空として扱います", path)
         return []
     if not isinstance(data, list):
         return []
@@ -163,16 +175,21 @@ def create_clips(creator: ClipCreator | None, vod_id: str, highlights: list[High
     for h, end, duration in pending:
         if creator is None or len(made) >= limit:
             break
-        # 記録の確認から追記までをロックする (auto と latest などが同時に同じ場面のクリップを作らないように)
-        with file_lock(registry) if registry else nullcontext():
-            if registry:
-                existing = _find_existing(_load_registry(registry), vod_id, end)
-                if existing:
-                    h.twitch_clip = existing["url"]
-                    h.twitch_clip_edit = existing.get("edit_url", "")
-                    continue
-            if not _create_one(creator, vod_id, h, end, duration, made, registry):
-                break
+        # 記録の確認から追記までをロックする (auto と latest などが同時に同じ場面のクリップを作らないように)。
+        # 相手のクリップ作成は再試行込みで数分かかることがあるので長めに待つ
+        try:
+            with file_lock(registry, timeout=REGISTRY_LOCK_TIMEOUT) if registry else nullcontext():
+                if registry:
+                    existing = _find_existing(_load_registry(registry), vod_id, end)
+                    if existing:
+                        h.twitch_clip = existing["url"]
+                        h.twitch_clip_edit = existing.get("edit_url", "")
+                        continue
+                if not _create_one(creator, vod_id, h, end, duration, made, registry):
+                    break
+        except TimeoutError:
+            log.warning("クリップの記録が他の処理に使われ続けているため、残りのクリップは作りません")
+            break
     return made
 
 
