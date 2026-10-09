@@ -298,8 +298,13 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     return result
 
 
+# 録画できないまま配信の終了を待つ最長時間 (配信状態の確認が失敗し続けても、いつかは先へ進む)
+MAX_OFFLINE_WAIT = 12 * 3600
+
+
 def _wait_until_offline(cfg: Config, helix, channel: str, checker: LiveChecker | None = None) -> None:
-    while _still_live(helix, channel, checker):
+    deadline = time.time() + MAX_OFFLINE_WAIT
+    while _still_live(helix, channel, checker) and time.time() < deadline:
         _sleep_checking_stop(cfg.watch.poll_interval)
 
 
@@ -339,7 +344,8 @@ def _preview(cfg: Config, channel: str, session_dir: Path, part: tuple[Path, flo
     chat, viewers = _load_signals(session_dir, -offset)
     result = _process_recording(cfg, channel, video, chat, viewers, run_dir / "live" / video.stem, previews,
                                 recorded - LIVE_TAIL_MARGIN, dry_run, publish=False)
-    return result or []
+    # 書き出しに失敗した場面は次回のプレビューで作り直せるよう、作れたものだけを覚えておく
+    return [h for h in result or [] if h.output_path or dry_run]
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +376,8 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
             if info:
                 vod_id, shift, vod_duration = info
                 session_length = _session_length(session_dir)
-                if shift + session_length > vod_duration + 120:
+                # (配信の途中で止めた場合、配信中の VOD の長さは遅れて更新されるので確かめない)
+                if vod_complete and shift + session_length > vod_duration + 120:
                     # 配信が途中で切れて別の VOD に分かれた場合など。この VOD だけでは録画の全体を作れない
                     log.warning("VOD (%s) が録画の途中で終わっているため、録画から作ります", vod_id)
                 else:

@@ -106,7 +106,8 @@ def clip_window(h: Highlight, shift: float = 0.0) -> tuple[int, float]:
 REGISTRY_LOCK_TIMEOUT = 900.0
 
 
-def _load_registry(path: Path | None) -> list[dict]:
+def _load_registry(path: Path | None, repair: bool = False) -> list[dict]:
+    """クリップの記録を読む。repair (ロックを持っているときだけ): 壊れていたら別名に移して作り直せるようにする。"""
     if not path or not path.exists():
         return []
     try:
@@ -115,6 +116,9 @@ def _load_registry(path: Path | None) -> list[dict]:
         log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
         return []
     except json.JSONDecodeError:
+        if not repair:
+            log.warning("クリップの記録 (%s) が壊れているため、空として扱います", path)
+            return []
         # 壊れた記録は上書きで消さないよう、別名で残しておく
         backup = path.with_name(f"{path.name}.broken-{int(time.time())}")
         try:
@@ -180,7 +184,7 @@ def create_clips(creator: ClipCreator | None, vod_id: str, highlights: list[High
         try:
             with file_lock(registry, timeout=REGISTRY_LOCK_TIMEOUT) if registry else nullcontext():
                 if registry:
-                    existing = _find_existing(_load_registry(registry), vod_id, end)
+                    existing = _find_existing(_load_registry(registry, repair=True), vod_id, end)
                     if existing:
                         h.twitch_clip = existing["url"]
                         h.twitch_clip_edit = existing.get("edit_url", "")

@@ -1644,12 +1644,12 @@ def test_clip_registry_is_rechecked_under_lock(tmp_path):
     real = tc._load_registry
     calls = []
 
-    def load(path):
+    def load(path, repair=False):
         calls.append(1)
         if len(calls) == 2:
             path.write_text(_json.dumps([{"vod_id": "v1", "end": round(end, 1), "duration": dur,
                                           "url": "https://clips.twitch.tv/X"}]), encoding="utf-8")
-        return real(path)
+        return real(path, repair)
 
     tc._load_registry, saved = load, tc._load_registry
     try:
@@ -1737,7 +1737,8 @@ def test_broken_clip_registry_is_kept_aside(tmp_path):
 
     reg = tmp_path / "twitch_clips.json"
     reg.write_text("{broken", encoding="utf-8")
-    assert _load_registry(reg) == []
+    assert _load_registry(reg) == [] and reg.exists()  # ロックを持たない読み込みでは動かさない
+    assert _load_registry(reg, repair=True) == []
     assert not reg.exists() and list(tmp_path.glob("twitch_clips.json.broken-*"))
 
 
@@ -1763,15 +1764,37 @@ def test_registry_lock_timeout_does_not_crash(tmp_path, monkeypatch):
     assert out == []
 
 
-def test_written_json_follows_umask(tmp_path):
-    import os
+def test_written_json_follows_umask(tmp_path, monkeypatch):
     import stat
 
-    from twitch_shorts.fileutil import write_json_atomic
+    from twitch_shorts import fileutil
 
-    old = os.umask(0o077)
-    try:
-        write_json_atomic(tmp_path / "a.json", [])
-    finally:
-        os.umask(old)
+    monkeypatch.setattr(fileutil, "_UMASK", 0o077)
+    fileutil.write_json_atomic(tmp_path / "a.json", [])
     assert stat.S_IMODE((tmp_path / "a.json").stat().st_mode) == 0o600
+
+
+# --- 17 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_failed_preview_renders_are_not_remembered(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts.models import Highlight
+
+    cfg, session = _session(tmp_path, make_stream)
+    ok = Highlight(start=10, end=40, peak=20, score=1.0, output_path="a.mp4")
+    failed = Highlight(start=50, end=80, peak=60, score=1.0)
+    monkeypatch.setattr(watcher, "_process_recording", lambda *a, **k: [ok, failed])
+    out = watcher._preview(cfg, "yuuki_ftw", session, (session / "stream.ts", 0.0), tmp_path / "o", [], 200, False)
+    assert out == [ok]
+
+
+def test_offline_wait_is_bounded(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(watcher.time, "time", lambda: clock[0])
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: True)
+
+    def tick(s):
+        clock[0] += s
+
+    monkeypatch.setattr(watcher, "_sleep_checking_stop", tick)
+    watcher._wait_until_offline(Config(), None, "ch")
+    assert clock[0] >= watcher.MAX_OFFLINE_WAIT
