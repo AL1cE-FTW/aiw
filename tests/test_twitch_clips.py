@@ -1798,3 +1798,49 @@ def test_offline_wait_is_bounded(monkeypatch):
     monkeypatch.setattr(watcher, "_sleep_checking_stop", tick)
     watcher._wait_until_offline(Config(), None, "ch")
     assert clock[0] >= watcher.MAX_OFFLINE_WAIT
+
+
+# --- 18 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_registry_with_bad_encoding_is_repaired(tmp_path):
+    from twitch_shorts.twitch_clips import _load_registry, clips_made_for
+
+    reg = tmp_path / "twitch_clips.json"
+    reg.write_bytes(b'[{"vod_id": "v1", "url": "\xe3\x81"}]')
+    assert clips_made_for(reg, "v1") == 0  # ロック無しの読み込みでは落ちない
+    assert _load_registry(reg, repair=True) == [] and not reg.exists()
+
+
+def test_corrupt_processed_vods_is_kept_aside(tmp_path):
+    from twitch_shorts.fileutil import add_processed_vod, processed_vods
+
+    (tmp_path / "processed_vods.json").write_text('["v1", "v2"', encoding="utf-8")
+    add_processed_vod(tmp_path, "v3")
+    assert processed_vods(tmp_path) == {"v3"}
+    assert list(tmp_path.glob("processed_vods.json.broken-*"))
+
+
+def test_registry_keeps_unknown_rows_and_survives_write_error(tmp_path, monkeypatch):
+    import json as _json
+
+    from twitch_shorts import twitch_clips
+    from twitch_shorts.models import Highlight
+
+    reg = tmp_path / "r.json"
+    reg.write_text(_json.dumps([{"note": "手で足した行"}]), encoding="utf-8")
+
+    class Creator:
+        def from_vod(self, *a):
+            return {"id": "C1", "edit_url": "e"}
+
+    hs = [Highlight(start=10, end=40, peak=20, score=2.0), Highlight(start=100, end=130, peak=110, score=1.0)]
+    twitch_clips.create_clips(Creator(), "v1", hs[:1], registry=reg)
+    rows = _json.loads(reg.read_text(encoding="utf-8"))
+    assert rows[0] == {"note": "手で足した行"} and len(rows) == 2
+
+    def fail(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(twitch_clips, "write_json_atomic", fail)
+    made = twitch_clips.create_clips(Creator(), "v1", hs[1:], registry=reg)
+    assert made and hs[1].twitch_clip

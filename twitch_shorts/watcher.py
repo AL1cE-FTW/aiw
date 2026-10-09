@@ -309,12 +309,12 @@ def _wait_until_offline(cfg: Config, helix, channel: str, checker: LiveChecker |
 
 
 def _still_live(helix, channel: str, checker: LiveChecker | None = None) -> bool:
-    # 確認に失敗したら「配信中」とみなす (通信の不調を配信終了と取り違えて、配信の途中で
-    # 完成扱いにしないため)。本当に終わっていれば録り直しがすぐ失敗し、下の対処で終了を待つ
-    """配信が続いているか (確認できなければ終わったとみなす)。
+    """配信が続いているか。
 
-    配信終了の直後は API がしばらく「配信中」と返すことがあるが、その場合は録り直しがすぐに失敗するので、
-    呼び出し側で「すぐ終わる録画が続いたら配信の終了を待つ」ことで対処する。
+    確認に失敗したら「配信中」とみなす (通信の不調を配信終了と取り違えて、配信の途中で完成扱いにしないため)。
+    本当に終わっていれば録り直しがすぐ失敗するので、呼び出し側で「すぐ終わる録画が続いたら配信の終了を待つ」。
+    (配信終了の直後に API がしばらく「配信中」と返す場合も同じ対処で済む。)
+    API も checker も無いときは確かめようがないので、終わったとみなす。
     """
     if checker is not None:
         return checker.is_live(channel, default=True)
@@ -376,8 +376,7 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
             if info:
                 vod_id, shift, vod_duration = info
                 session_length = _session_length(session_dir)
-                # (配信の途中で止めた場合、配信中の VOD の長さは遅れて更新されるので確かめない)
-                if vod_complete and shift + session_length > vod_duration + 120:
+                if shift + session_length > vod_duration + 120:
                     # 配信が途中で切れて別の VOD に分かれた場合など。この VOD だけでは録画の全体を作れない
                     log.warning("VOD (%s) が録画の途中で終わっているため、録画から作ります", vod_id)
                 else:

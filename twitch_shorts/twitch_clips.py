@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
@@ -19,7 +18,7 @@ from pathlib import Path
 
 import requests
 
-from .fileutil import file_lock, write_json_atomic
+from .fileutil import file_lock, read_json, read_list_for_update, write_json_atomic
 from .models import Highlight
 from .twitch_auth import TwitchAuthError, UserToken
 
@@ -107,28 +106,20 @@ REGISTRY_LOCK_TIMEOUT = 900.0
 
 
 def _load_registry(path: Path | None, repair: bool = False) -> list[dict]:
-    """クリップの記録を読む。repair (ロックを持っているときだけ): 壊れていたら別名に移して作り直せるようにする。"""
-    if not path or not path.exists():
+    """クリップの記録の有効な行を読む。
+
+    repair (ロックを持っているときだけ): 壊れていたら別名に移して作り直せるようにする。読めなければ OSError。
+    repair でなければ、読めない・壊れているときは空として扱う (ファイルには触らない)。
+    """
+    if not path:
         return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError:
-        log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
-        return []
-    except json.JSONDecodeError:
-        if not repair:
-            log.warning("クリップの記録 (%s) が壊れているため、空として扱います", path)
-            return []
-        # 壊れた記録は上書きで消さないよう、別名で残しておく
-        backup = path.with_name(f"{path.name}.broken-{int(time.time())}")
-        try:
-            path.replace(backup)
-            log.warning("クリップの記録 (%s) が壊れているため、%s に移して新しく記録します", path, backup.name)
-        except OSError:
-            log.warning("クリップの記録 (%s) が壊れているため、空として扱います", path)
-        return []
-    if not isinstance(data, list):
-        return []
+    if repair:
+        data = read_list_for_update(path)
+    else:
+        data = read_json(path, [])
+        if not isinstance(data, list):
+            log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
+            data = []
     valid = []
     for r in data:
         try:
@@ -194,6 +185,9 @@ def create_clips(creator: ClipCreator | None, vod_id: str, highlights: list[High
         except TimeoutError:
             log.warning("クリップの記録が他の処理に使われ続けているため、残りのクリップは作りません")
             break
+        except OSError as e:  # 記録を読めない: 空とみなして作ると二重に作るおそれがある
+            log.warning("クリップの記録を読めないため、残りのクリップは作りません: %s", e)
+            break
     return made
 
 
@@ -217,8 +211,12 @@ def _create_one(creator: ClipCreator, vod_id: str, h: Highlight, end: float, dur
     log.info("Twitch クリップを作成: %s  %s", h.title, h.twitch_clip)
     made.append(h)
     if registry:
-        # 別のプロセスが同時に書き足していても消さないよう、読み直してから追記する (ロックは呼び出し側)
+        # 別のプロセスが同時に書き足していても消さないよう、読み直してから追記する (ロックは呼び出し側)。
+        # 読めない行もそのまま残す
         entry = {"vod_id": vod_id, "end": round(end, 1), "duration": duration, "url": h.twitch_clip,
                  "edit_url": h.twitch_clip_edit, "id": clip.get("id", ""), "title": h.title}
-        write_json_atomic(registry, [*_load_registry(registry), entry])
+        try:
+            write_json_atomic(registry, [*read_list_for_update(registry), entry])
+        except OSError as e:  # クリップはできているので、記録に失敗しても続ける
+            log.error("作ったクリップを記録できませんでした (%s): %s", h.twitch_clip, e)
     return True

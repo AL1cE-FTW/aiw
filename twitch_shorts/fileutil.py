@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
@@ -24,13 +27,25 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
             f.write(json.dumps(data, ensure_ascii=False, indent=2))
         if not private:
             os.chmod(tmp, 0o666 & ~_UMASK)  # 普通にファイルを作ったときと同じ権限にする
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+
+
+def _replace(src: str, dst: Path) -> None:
+    """os.replace。Windows では別の処理が読んでいる間は置き換えられないので、少し待ってやり直す。"""
+    for i in range(10):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or i == 9:
+                raise
+            time.sleep(0.2)
 
 
 def _read_umask() -> int:
@@ -60,11 +75,33 @@ def processed_vods(work_dir: str | Path) -> set[str]:
     return {str(v) for v in data} if isinstance(data, list) else set()
 
 
+def read_list_for_update(path: str | Path) -> list:
+    """書き足す前に JSON の配列を読む (ロックを持っているときに使う)。
+
+    読めない (OSError) ときは例外のまま返す (空として上書きすると、これまでの記録が消えるため)。
+    壊れている・配列でないときは別名 (``<名前>.broken-<時刻>``) に移して残し、空から作り直す。
+    """
+    path = Path(path)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+    except ValueError:  # JSON の誤り・文字コードの誤り
+        pass
+    backup = path.with_name(f"{path.name}.broken-{int(time.time())}")
+    os.replace(path, backup)
+    log.warning("%s が壊れているため %s に移して、新しく記録します", path, backup.name)
+    return []
+
+
 def add_processed_vod(work_dir: str | Path, vod_id: str) -> None:
     """処理済みの VOD を記録する (別のプロセスが同時に書き足していても消さない)。"""
     path = Path(work_dir) / PROCESSED_VODS
     with file_lock(path):
-        write_json_atomic(path, sorted(processed_vods(work_dir) | {vod_id}))
+        done = {str(v) for v in read_list_for_update(path)}
+        write_json_atomic(path, sorted(done | {vod_id}))
 
 
 def read_jsonl(text: str) -> list[dict]:
