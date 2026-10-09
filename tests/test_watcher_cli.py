@@ -31,6 +31,9 @@ def test_record_and_process_with_mocked_stream(make_stream, tmp_path, monkeypatc
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
     cfg.render.width, cfg.render.height = 360, 640
     class FakeHelix:
+        def is_live(self, login):
+            return False
+
         def get_stream(self, login):
             return {"viewer_count": 12}
 

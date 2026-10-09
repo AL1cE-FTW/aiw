@@ -141,7 +141,10 @@ def rerank_with_claude(
         h.hook = str(r.get("hook") or "").strip()
         h.category = str(r.get("category") or "").strip()
         h.description = str(r.get("description") or "").strip()
-        h.hashtags = [t for t in (normalize_hashtag(x) for x in r.get("hashtags") or []) if t]
+        tags = r.get("hashtags") or []
+        if isinstance(tags, str):  # 1 つの文字列で返ってきた場合 ("#apex #clutch")
+            tags = tags.split()
+        h.hashtags = [t for t in (normalize_hashtag(x) for x in tags if isinstance(x, str)) if t]
         h.reason = str(r.get("reason") or "").strip()
         start, end = float(r.get("start", h.start)), float(r.get("end", h.end))
         # LLM の提案は元の候補区間の内側かつ長さ制約を満たす場合だけ採用する

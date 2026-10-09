@@ -5,6 +5,8 @@
   - チャット (chat.jsonl)・同時視聴者数 (viewers.jsonl)。時刻はどちらも録画開始からの経過秒
   - parts.json: 各録画ファイルが録画開始から何秒目に始まったか
 配信が終わったら、その配信の VOD から正式版を作る (VOD が無ければ録画から)。
+録画は広告を飛ばすので、広告のあとはチャット (経過時刻で記録) と録画の位置がずれる。そのため録画から作るのは
+プレビューと、VOD が無い場合の代わりだけにしている。
 """
 
 from __future__ import annotations
@@ -300,19 +302,22 @@ def _wait_until_offline(cfg: Config, helix, channel: str, checker: LiveChecker |
 
 
 def _still_live(helix, channel: str, checker: LiveChecker | None = None) -> bool:
+    # 確認に失敗したら「配信中」とみなす (通信の不調を配信終了と取り違えて、配信の途中で
+    # 完成扱いにしないため)。本当に終わっていれば録り直しがすぐ失敗し、下の対処で終了を待つ
     """配信が続いているか (確認できなければ終わったとみなす)。
 
     配信終了の直後は API がしばらく「配信中」と返すことがあるが、その場合は録り直しがすぐに失敗するので、
     呼び出し側で「すぐ終わる録画が続いたら配信の終了を待つ」ことで対処する。
     """
     if checker is not None:
-        return checker.is_live(channel)
+        return checker.is_live(channel, default=True)
     if helix is None:
         return False
     try:
         return bool(helix.is_live(channel))
-    except Exception:
-        return False
+    except Exception as e:
+        log.warning("配信状態の確認に失敗しました: %s", e)
+        return True
 
 
 def _preview(cfg: Config, channel: str, session_dir: Path, part: tuple[Path, float], run_dir: Path,
@@ -380,7 +385,8 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
         window = (vod[1], vod[1] + _session_length(session_dir))
     else:
         window = None
-    if vod and not others and vod[0] in processed_vods(cfg.work_dir):
+    # latest が作った VOD だけを飛ばす (自分たちのセッションが使った VOD は、ショートが 0 本でも続きを作る)
+    if vod and not _sessions_with_vod(cfg, channel, vod[0], session_dir) and vod[0] in processed_vods(cfg.work_dir):
         log.info("この配信の VOD (%s) は latest コマンドで作成済みです", vod[0])
         result = []
     elif vod:
@@ -401,13 +407,16 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
     return result
 
 
+def _sessions_with_vod(cfg: Config, channel: str, vod_id: str, me: Path) -> list[Path]:
+    base = Path(cfg.work_dir) / channel
+    return [o for o in (sorted(base.glob("*/")) if base.exists() else [])
+            if o != me and _load_meta(o).get("vod_id") == vod_id]
+
+
 def _highlights_of_vod(cfg: Config, channel: str, vod_id: str, me: Path) -> list[Highlight]:
     """同じ VOD から別のセッションで作ったショート (配信中に監視を再起動した場合など)。重ねて作らないために使う。"""
     found: dict[tuple, Highlight] = {}
-    base = Path(cfg.work_dir) / channel
-    for other in sorted(base.glob("*/")) if base.exists() else []:
-        if other == me or _load_meta(other).get("vod_id") != vod_id:
-            continue
+    for other in _sessions_with_vod(cfg, channel, vod_id, me):
         data = read_json(Path(cfg.output_dir) / channel / other.name / "highlights.json", {})
         try:
             for d in data.get("highlights", []):

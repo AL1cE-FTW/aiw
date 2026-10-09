@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -347,15 +347,21 @@ def test_dry_run_watch_session_creates_no_clips(make_stream, tmp_path, monkeypat
         def stop(self):
             pass
 
+    # 配信は 30 秒前に始まった (VOD の位置の計算は現在時刻を使うので、固定の日時にしない)
+    started = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=30)
+
     class FakeHelix:
+        def is_live(self, login):
+            return False
+
         def get_stream(self, login):
-            return {"viewer_count": 3, "started_at": "2026-10-08T12:00:00Z"}
+            return {"viewer_count": 3, "started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
         def get_user_id(self, login):
             return "42"
 
         def get_recent_archives(self, uid, n):
-            return [VideoInfo("v1", "42", "yuuki_ftw", "Y", "t", datetime(2026, 10, 8, 12, tzinfo=timezone.utc), 999, "u")]
+            return [VideoInfo("v1", "42", "yuuki_ftw", "Y", "t", started, 999, "u")]
 
     monkeypatch.setattr(watcher, "LiveChatRecorder", FakeChat)
     monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
@@ -451,6 +457,9 @@ def test_final_pass_uses_vod_timeline(make_stream, tmp_path, monkeypatch):
     lookups = []
 
     class FakeHelix:
+        def is_live(self, login):
+            return False
+
         def get_stream(self, login):
             return None  # 開始時刻は不明
 
@@ -1588,3 +1597,81 @@ def test_recorder_messages_go_to_a_file(tmp_path, monkeypatch):
     assert seen["stderr"] is not subprocess.PIPE and proc.log_path == tmp_path / "stream.log"
     proc.log_path.write_bytes(b"error: 403")
     assert download.recorder_log_tail(proc) == "error: 403"
+
+
+# --- 15 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_own_session_vod_in_processed_list_is_not_skipped(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts.fileutil import add_processed_vod
+
+    cfg, session = _session(tmp_path, make_stream)
+    other = session.parent / "20261008_190000"
+    other.mkdir()
+    watcher._save_meta(other, vod_id="v1")  # 前のセッションは VOD から作ったが 0 本だった
+    add_processed_vod(cfg.work_dir, "v1")
+    monkeypatch.setattr(watcher, "find_stream_vod_info", lambda *a, **k: ("v1", 0.0, 9999.0))
+    calls = []
+    monkeypatch.setattr(watcher, "_run_from_vod", lambda *a: calls.append(1) or [])
+    watcher._final_pass(cfg, "yuuki_ftw", object(), 0.0, 0.0, session, tmp_path / "o", False)
+    assert calls == [1]
+
+
+def test_live_check_error_is_not_treated_as_stream_end():
+    class Helix:
+        def is_live(self, channel):
+            raise RuntimeError("timeout")
+
+    assert watcher._still_live(Helix(), "ch") is True
+
+
+def test_clip_registry_is_rechecked_under_lock(tmp_path):
+    import json as _json
+
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.twitch_clips import clip_window, create_clips
+
+    reg = tmp_path / "clips.json"
+    h = Highlight(start=10, end=40, peak=20, score=1.0)
+    end, dur = clip_window(h, 0.0)
+
+    class Creator:
+        def from_vod(self, *a):
+            pytest.fail("別のプロセスが作ったクリップをもう一度作った")
+
+    # 最初の読み込みの後に、別のプロセスが同じ場面のクリップを記録した状況
+    reg.write_text("[]", encoding="utf-8")
+    import twitch_shorts.twitch_clips as tc
+    real = tc._load_registry
+    calls = []
+
+    def load(path):
+        calls.append(1)
+        if len(calls) == 2:
+            path.write_text(_json.dumps([{"vod_id": "v1", "end": round(end, 1), "duration": dur,
+                                          "url": "https://clips.twitch.tv/X"}]), encoding="utf-8")
+        return real(path)
+
+    tc._load_registry, saved = load, tc._load_registry
+    try:
+        create_clips(Creator(), "v1", [h], registry=reg)
+    finally:
+        tc._load_registry = saved
+    assert h.twitch_clip == "https://clips.twitch.tv/X"
+
+
+def test_llm_hashtags_as_string_are_split():
+    from types import SimpleNamespace
+
+    from twitch_shorts.config import LLMConfig
+    from twitch_shorts.llm import rerank_with_claude
+    from twitch_shorts.models import Highlight
+
+    import json as _json
+    text = _json.dumps({"candidates": [{"id": 0, "score": 8, "title": "t", "hook": "h", "category": "その他",
+                                        "description": "d", "hashtags": "#apex #clutch", "reason": "r",
+                                        "start": 10, "end": 40}]})
+    resp = SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=text)])
+    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(create=lambda **k: resp)))
+    out = rerank_with_claude([Highlight(start=10, end=40, peak=20, score=1.0)], LLMConfig(), "ch", "", 15, 60,
+                             client=client)
+    assert out[0].hashtags == ["#apex", "#clutch"]
