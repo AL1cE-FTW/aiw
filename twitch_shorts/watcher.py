@@ -432,13 +432,14 @@ def _highlights_of_vod(cfg: Config, channel: str, vod_id: str, me: Path) -> list
     found: dict[tuple, Highlight] = {}
     for other in _sessions_with_vod(cfg, channel, vod_id, me):
         data = read_json(Path(cfg.output_dir) / channel / other.name / "highlights.json", {})
-        try:
-            for d in data.get("highlights", []):
+        items = data.get("highlights", []) if isinstance(data, dict) else []
+        for d in items if isinstance(items, list) else []:
+            try:
                 if d.get("output_path"):
                     # 各セッションの結果には、そのセッションが除いた別セッションの分も入っているので重複を除く
                     found.setdefault((d.get("start"), d.get("end"), d["output_path"]), Highlight.from_dict(d))
-        except (AttributeError, TypeError, ValueError):
-            continue
+            except (AttributeError, TypeError, ValueError):
+                continue  # 壊れた行だけ飛ばす
     return list(found.values())
 
 

@@ -98,6 +98,9 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
                      # (違っていれば Twitch 側が拒否し、1 回で作成をやめる)
                      clip_owner=owner or channel)
     _print_result(result.highlights)
+    if not args.dry_run and result.highlights and not any(h.output_path for h in result.highlights):
+        log.error("ショートを 1 本も書き出せませんでした (ディスクの空きやネットワークを確認してください)")
+        return 1
     return 0
 
 
@@ -122,7 +125,9 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         log.info("処理開始: %s %s", v.id, v.title)
         args.vod, args.chat = v.id, None
         args.channel = args.channel.lower()
-        cmd_vod(cfg, args)
+        if cmd_vod(cfg, args) != 0:
+            log.warning("作れなかったため、次回もう一度試します: %s", v.id)
+            continue
         if not args.dry_run:
             add_processed_vod(cfg.work_dir, v.id)
     return 0

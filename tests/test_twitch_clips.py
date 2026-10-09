@@ -1906,3 +1906,80 @@ def test_schedule_csv_is_written(tmp_path):
     text = (tmp_path / "out" / "schedule.csv").read_text(encoding="utf-8-sig")
     assert text.startswith("publish_at,") and "テスト" in text
     assert not list((tmp_path / "out").glob("*.tmp"))
+
+
+# --- 20 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_hand_edited_schedule_rows_are_skipped(tmp_path):
+    import json as _json
+
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.schedule import add_to_schedule, load_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "schedule.json").write_text(_json.dumps(
+        [{"publish_at": "2026-10-10T19:00:00+09:00", "path": "a.mp4", "title": "a"}, "壊れた行",
+         {"publish_at": "あした", "path": "b.mp4"}]), encoding="utf-8")
+    assert [e["path"] for e in load_schedule(cfg)] == ["a.mp4"]
+    h = Highlight(start=10, end=40, peak=20, score=1.0, title="t", output_path=str(tmp_path / "c.mp4"))
+    assert add_to_schedule(cfg, [h], "ch")
+
+
+def test_broken_schedule_is_kept_aside(tmp_path):
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.schedule import add_to_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "schedule.json").write_text("[{", encoding="utf-8")
+    h = Highlight(start=10, end=40, peak=20, score=1.0, title="t", output_path=str(tmp_path / "c.mp4"))
+    assert add_to_schedule(cfg, [h], "ch")
+    assert list((tmp_path / "out").glob("schedule.json.broken-*"))
+
+
+def test_one_bad_highlight_row_does_not_hide_others(tmp_path):
+    import json as _json
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    d = tmp_path / "work" / "yuuki_ftw" / "s1"
+    d.mkdir(parents=True)
+    watcher._save_meta(d, vod_id="v1")
+    out = tmp_path / "out" / "yuuki_ftw" / "s1"
+    out.mkdir(parents=True)
+    (out / "highlights.json").write_text(_json.dumps({"highlights": [
+        {"start": 1, "end": 2, "output_path": "bad.mp4"},  # 必須の項目が無い
+        {"start": 10.0, "end": 40.0, "peak": 20.0, "score": 1.0, "output_path": "a.mp4"}]}), encoding="utf-8")
+    me = tmp_path / "work" / "yuuki_ftw" / "s2"
+    me.mkdir()
+    assert [h.output_path for h in watcher._highlights_of_vod(cfg, "yuuki_ftw", "v1", me)] == ["a.mp4"]
+
+
+def test_latest_does_not_mark_vod_when_nothing_rendered(tmp_path, monkeypatch):
+    import argparse
+    from types import SimpleNamespace
+
+    from twitch_shorts import cli, twitch_api
+    from twitch_shorts.fileutil import processed_vods
+
+    v = SimpleNamespace(id="v1", title="t", created_at=datetime(2026, 10, 8, 12, tzinfo=timezone.utc))
+
+    class Helix:
+        def __init__(self, *a):
+            pass
+
+        def get_user_id(self, c):
+            return "u"
+
+        def get_recent_archives(self, u, n):
+            return [v]
+
+        def get_stream(self, c):
+            return None
+
+    monkeypatch.setattr(twitch_api, "HelixClient", Helix)
+    monkeypatch.setattr(cli, "cmd_vod", lambda cfg, args: 1)
+    cfg = Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w"))
+    cfg.twitch.client_id, cfg.twitch.client_secret = "id", "secret"
+    cli.cmd_latest(cfg, argparse.Namespace(channel="ch", count=1, force=False, dry_run=False))
+    assert processed_vods(cfg.work_dir) == set()

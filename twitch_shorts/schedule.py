@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 from collections import Counter
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Config
-from .fileutil import file_lock, write_json_atomic, write_text_atomic
+from .fileutil import file_lock, read_json, read_list_for_update, write_json_atomic, write_text_atomic
 from .models import Highlight
 
 SCHEDULE_JSON = "schedule.json"
@@ -27,11 +26,22 @@ def _paths(cfg: Config) -> tuple[Path, Path]:
     return out / SCHEDULE_JSON, out / SCHEDULE_CSV
 
 
-def load_schedule(cfg: Config) -> list[dict]:
+def load_schedule(cfg: Config, for_update: bool = False) -> list[dict]:
+    """投稿予定表を読む。for_update (ロック中に書き足す前): 壊れていたら別名に移して作り直す。"""
     path, _ = _paths(cfg)
-    if not path.exists():
-        return []
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    data = read_list_for_update(path) if for_update else read_json(path, [])
+    return [e for e in data if _valid_entry(e)] if isinstance(data, list) else []
+
+
+def _valid_entry(e) -> bool:
+    """手で編集して形の崩れた行は飛ばす。"""
+    if not isinstance(e, dict) or not isinstance(e.get("path"), str):
+        return False
+    try:
+        datetime.fromisoformat(e["publish_at"])
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _slot_times(cfg: Config, day: date, tz: ZoneInfo) -> list[datetime]:
@@ -54,7 +64,7 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
                      now: datetime | None) -> list[dict]:
     tz = ZoneInfo(cfg.publish.timezone)
     now = (now or datetime.now(tz)).astimezone(tz)
-    entries = load_schedule(cfg)
+    entries = load_schedule(cfg, for_update=True)
     known = {e["path"] for e in entries}
     used = Counter(datetime.fromisoformat(e["publish_at"]).astimezone(tz).isoformat() for e in entries)
 
