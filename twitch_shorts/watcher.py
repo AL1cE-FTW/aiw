@@ -210,6 +210,7 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     previews: dict[str, list[Highlight]] = {}  # 録画ファイルごとのプレビュー (時刻の基準がファイルごとに違うため)
     interrupted = False
     stream_started = None
+    stream_ended = False  # 配信の終了を確かめてループを抜けたか
     next_run = start_time + cfg.watch.rolling_minutes * 60
     try:
         _save_meta(session_dir, start_time=start_time)
@@ -242,13 +243,14 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             if proc.returncode not in (0, None, -15) and tail:
                 log.warning("録画プロセスの出力: %s", tail)
             if not _still_live(helix, channel, checker):
+                stream_ended = True
                 break
             # すぐに終わってしまう録画が続く場合 (配信終了直後で API の反映が遅れている場合も含む) は、
             # 録画をあきらめて配信の終了を待つ (VOD から作るので取りこぼさない)
             quick_failures = quick_failures + 1 if time.time() - part_started < 60 else 0
             if quick_failures >= MAX_RECORDER_RESTARTS:
                 log.warning("録画を再開できません。配信の終了を待ってから作ります")
-                _wait_until_offline(cfg, helix, channel, checker)
+                stream_ended = _wait_until_offline(cfg, helix, channel, checker)
                 break
             if quick_failures:
                 _sleep_checking_stop(RESTART_BACKOFF_SECONDS)
@@ -289,7 +291,7 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         log.info("記録したチャットと VOD から作ります")
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
     # 配信が終わっていれば VOD も完成している (途中で止めた場合は、残りを latest などで作れるよう完成扱いにしない)
-    ended = not interrupted and not _STOP.is_set() and not _still_live(helix, channel, checker)
+    ended = stream_ended and not interrupted and not _STOP.is_set()
     result = _final_pass(cfg, channel, helix, start_time, stream_started, session_dir, run_dir, dry_run,
                          vod_complete=ended) or []
     if interrupted or _STOP.is_set():
@@ -302,10 +304,14 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
 MAX_OFFLINE_WAIT = 12 * 3600
 
 
-def _wait_until_offline(cfg: Config, helix, channel: str, checker: LiveChecker | None = None) -> None:
+def _wait_until_offline(cfg: Config, helix, channel: str, checker: LiveChecker | None = None) -> bool:
+    """配信の終了を待つ。終わったら True、待ちきれなかったら False。"""
     deadline = time.time() + MAX_OFFLINE_WAIT
-    while _still_live(helix, channel, checker) and time.time() < deadline:
+    while _still_live(helix, channel, checker):
+        if time.time() >= deadline:
+            return False
         _sleep_checking_stop(cfg.watch.poll_interval)
+    return True
 
 
 def _still_live(helix, channel: str, checker: LiveChecker | None = None) -> bool:

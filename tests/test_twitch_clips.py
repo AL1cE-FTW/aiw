@@ -1844,3 +1844,65 @@ def test_registry_keeps_unknown_rows_and_survives_write_error(tmp_path, monkeypa
     monkeypatch.setattr(twitch_clips, "write_json_atomic", fail)
     made = twitch_clips.create_clips(Creator(), "v1", hs[1:], registry=reg)
     assert made and hs[1].twitch_clip
+
+
+# --- 19 回目のレビュー指摘の回帰テスト --------------------------------------
+
+def test_token_with_bad_bytes_is_reported_not_crashing(tmp_path):
+    from twitch_shorts.twitch_auth import load_token, token_path
+
+    p = token_path(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b'{"access_token": "\xff\xfe"}')
+    assert load_token(tmp_path) is None
+
+
+def test_processed_vods_with_bom_is_kept(tmp_path):
+    from twitch_shorts.fileutil import add_processed_vod, processed_vods
+
+    (tmp_path / "processed_vods.json").write_text('["v1"]', encoding="utf-8-sig")
+    assert processed_vods(tmp_path) == {"v1"}
+    add_processed_vod(tmp_path, "v2")
+    assert processed_vods(tmp_path) == {"v1", "v2"} and not list(tmp_path.glob("*.broken-*"))
+
+
+def test_stream_end_is_not_rechecked_for_vod_complete(tmp_path, monkeypatch):
+    class Proc:
+        returncode = 0
+        stderr = None
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+    def fake_start(channel, path, *a):
+        path.write_bytes(b"x")
+        return Proc()
+
+    answers = iter([False, True, True])  # 1 回目で終了を確認。2 回目以降は API の揺れで「配信中」
+    monkeypatch.setattr(watcher, "start_live_recording", fake_start)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", lambda *a, **k: type("C", (), {
+        "start": lambda s: None, "stop": lambda s: None, "count": 0})())
+    monkeypatch.setattr(watcher, "_still_live", lambda *a: next(answers))
+    monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
+    seen = []
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: seen.append(k.get("vod_complete")) or [])
+    watcher.record_and_process(Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w")), "ch")
+    assert seen == [True]
+
+
+def test_schedule_csv_is_written(tmp_path):
+    from twitch_shorts.models import Highlight
+    from twitch_shorts.schedule import add_to_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    h = Highlight(start=10, end=40, peak=20, score=1.0, title="テスト", output_path=str(tmp_path / "a.mp4"))
+    add_to_schedule(cfg, [h], "ch")
+    text = (tmp_path / "out" / "schedule.csv").read_text(encoding="utf-8-sig")
+    assert text.startswith("publish_at,") and "テスト" in text
+    assert not list((tmp_path / "out").glob("*.tmp"))

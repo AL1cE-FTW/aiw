@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 from collections import Counter
 from datetime import date, datetime, time, timedelta
@@ -14,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Config
-from .fileutil import file_lock, write_json_atomic
+from .fileutil import file_lock, write_json_atomic, write_text_atomic
 from .models import Highlight
 
 SCHEDULE_JSON = "schedule.json"
@@ -30,7 +31,7 @@ def load_schedule(cfg: Config) -> list[dict]:
     path, _ = _paths(cfg)
     if not path.exists():
         return []
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def _slot_times(cfg: Config, day: date, tz: ZoneInfo) -> list[datetime]:
@@ -93,10 +94,11 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
     json_path, csv_path = _paths(cfg)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     write_json_atomic(json_path, entries)  # 逐次処理のたびに書き換えるので、途中で止まっても壊れないように
-    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:  # Excel でも文字化けしないよう BOM 付き
-        w = csv.DictWriter(f, fieldnames=["publish_at", "title", "hook", "category", "description", "hashtags",
-                                          "channel", "score", "duration", "path", "twitch_clip"],
-                           extrasaction="ignore")
-        w.writeheader()
-        w.writerows(entries)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=["publish_at", "title", "hook", "category", "description", "hashtags",
+                                        "channel", "score", "duration", "path", "twitch_clip"],
+                       extrasaction="ignore")
+    w.writeheader()
+    w.writerows(entries)
+    write_text_atomic(csv_path, buf.getvalue(), encoding="utf-8-sig")  # Excel でも文字化けしないよう BOM 付き
     return added

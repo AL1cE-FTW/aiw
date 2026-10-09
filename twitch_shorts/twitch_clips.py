@@ -115,8 +115,10 @@ def _load_registry(path: Path | None, repair: bool = False) -> list[dict]:
         return []
     if repair:
         data = read_list_for_update(path)
+    elif not path.exists():
+        data = []
     else:
-        data = read_json(path, [])
+        data = read_json(path)
         if not isinstance(data, list):
             log.warning("クリップの記録 (%s) を読めないため、空として扱います", path)
             data = []

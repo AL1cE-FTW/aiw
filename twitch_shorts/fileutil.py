@@ -36,6 +36,24 @@ def write_json_atomic(path: str | Path, data, private: bool = False) -> None:
         raise
 
 
+def write_text_atomic(path: str | Path, text: str, encoding: str = "utf-8") -> None:
+    """テキストを一時ファイルに書いてから置き換える (途中で止まっても元のファイルが壊れない)。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as f:
+            f.write(text)
+        os.chmod(tmp, 0o666 & ~_UMASK)
+        _replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _replace(src: str, dst: Path) -> None:
     """os.replace。Windows では別の処理が読んでいる間は置き換えられないので、少し待ってやり直す。"""
     for i in range(10):
@@ -61,7 +79,8 @@ _UMASK = _read_umask()
 def read_json(path: str | Path, default=None):
     """JSON ファイルを読む。無い・読めない・壊れている場合は default を返す。"""
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        # utf-8-sig: メモ帳などで BOM 付きで保存し直されたファイルも読めるように
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return default
 
@@ -85,13 +104,13 @@ def read_list_for_update(path: str | Path) -> list:
     if not path.exists():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         if isinstance(data, list):
             return data
     except ValueError:  # JSON の誤り・文字コードの誤り
         pass
-    backup = path.with_name(f"{path.name}.broken-{int(time.time())}")
-    os.replace(path, backup)
+    backup = path.with_name(f"{path.name}.broken-{time.time_ns()}")
+    _replace(str(path), backup)
     log.warning("%s が壊れているため %s に移して、新しく記録します", path, backup.name)
     return []
 

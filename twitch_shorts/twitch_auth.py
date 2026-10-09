@@ -116,8 +116,8 @@ def load_token(work_dir: str | Path) -> dict | None:
     if not p.exists():
         return None
     try:
-        token = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        token = json.loads(p.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):  # 読めない・JSON や文字コードが壊れている
         log.warning("ログイン情報 (%s) が壊れています。twitch-shorts login をやり直してください", p)
         return None
     return token if isinstance(token, dict) and token.get("access_token") else None
