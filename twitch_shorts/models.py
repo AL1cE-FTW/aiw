@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 
 
+def normalize_hashtag(tag: str) -> str:
+    """"#タグ" の形にそろえる (全角の ＃ や、# が無いものも)。空なら空文字。
+
+    タグの途中に空白があるとそこでタグが切れてしまうので、空白は詰める ("#Apex Legends" → "#ApexLegends")。
+    """
+    t = "".join(str(tag).split()).lstrip("#＃")
+    return f"#{t}" if t else ""
+
+
 @dataclass
 class ChatMessage:
     """配信開始(またはVOD先頭)からの秒数 ``offset`` を持つチャット1件。"""
@@ -64,11 +73,17 @@ class Highlight:
     signals: dict[str, float] = field(default_factory=dict)
     title: str = ""
     hook: str = ""  # 冒頭に出す「引きの言葉」
+    category: str = ""  # 面白い / スーパープレイ / ほっこり / ネタ・名場面 / その他
+    description: str = ""  # 投稿用の説明文
+    hashtags: list[str] = field(default_factory=list)
     reason: str = ""
     chat_sample: list[str] = field(default_factory=list)
     transcript: str = ""
     output_path: str = ""
     video_duration: float = 0.0  # 書き出した動画の実際の長さ (先見せを含む)
+    twitch_clip: str = ""  # 作成した Twitch 公式クリップの公開 URL (視聴者に共有できる)
+    twitch_clip_edit: str = ""  # そのクリップの編集ページ (配信者本人のみ)
+    vod_url: str = ""  # VOD のこの場面を開く URL (手動でクリップするとき用)
 
     @property
     def duration(self) -> float:

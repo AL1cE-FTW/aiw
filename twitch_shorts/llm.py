@@ -10,9 +10,12 @@ import json
 import logging
 
 from .config import LLMConfig
-from .models import Highlight
+from .models import Highlight, normalize_hashtag
 
 log = logging.getLogger(__name__)
+
+# 場面の種類 (参考: KumoMoments の funny / clutch / wholesome / lore)
+CATEGORIES = ["面白い", "スーパープレイ", "ほっこり", "ネタ・名場面", "その他"]
 
 RESULT_SCHEMA = {
     "type": "object",
@@ -26,11 +29,14 @@ RESULT_SCHEMA = {
                     "score": {"type": "number", "description": "0〜10。ショート動画としての面白さ"},
                     "title": {"type": "string"},
                     "hook": {"type": "string", "description": "冒頭 3 秒に出す引きの言葉 (10 文字以内)"},
+                    "category": {"type": "string", "enum": CATEGORIES},
+                    "description": {"type": "string", "description": "投稿時の説明文 (2 文以内)"},
+                    "hashtags": {"type": "array", "items": {"type": "string"}},
                     "reason": {"type": "string"},
                     "start": {"type": "number"},
                     "end": {"type": "number"},
                 },
-                "required": ["id", "score", "title", "hook", "reason", "start", "end"],
+                "required": ["id", "score", "title", "hook", "category", "description", "hashtags", "reason", "start", "end"],
                 "additionalProperties": False,
             },
         }
@@ -50,6 +56,10 @@ SYSTEM_PROMPT = """あなたは Twitch 配信の切り抜き編集者です。
 - hook: 動画の最初の 3 秒に大きく表示する「引きの言葉」。{language}で 10 文字以内。
   ショートは最初の 3 秒でスワイプされるかが決まるため、続きを見たくなる言葉にする
   (例: 「まさかの結末」「これ見て」「1v3の結果…」)。オチそのものは言わない。
+- category: 場面の種類。面白い (笑い・ハプニング) / スーパープレイ (クラッチ・神エイム) /
+  ほっこり (かわいい・優しい) / ネタ・名場面 (チャンネルの定番ネタ・語り草) / その他 から選ぶ。
+- description: YouTube / TikTok に投稿するときの説明文。{language}で 2 文以内、ネタバレしすぎない。
+- hashtags: 投稿用ハッシュタグを 3〜5 個 (# 付き)。ゲーム名・チャンネルに関するものを含める。
 - reason: 評価理由を 1 文で。
 - start / end: 候補区間 (秒) の範囲内で、より良い切り出し位置があれば調整した値。
   長さは {min_dur:.0f}〜{max_dur:.0f} 秒に収めること。調整不要なら元の値をそのまま返す。
@@ -129,6 +139,12 @@ def rerank_with_claude(
             continue
         h.title = str(r.get("title") or "").strip()
         h.hook = str(r.get("hook") or "").strip()
+        h.category = str(r.get("category") or "").strip()
+        h.description = str(r.get("description") or "").strip()
+        tags = r.get("hashtags") or []
+        if isinstance(tags, str):  # 1 つの文字列で返ってきた場合 ("#apex #clutch")
+            tags = tags.split()
+        h.hashtags = [t for t in (normalize_hashtag(x) for x in tags if isinstance(x, str)) if t]
         h.reason = str(r.get("reason") or "").strip()
         start, end = float(r.get("start", h.start)), float(r.get("end", h.end))
         # LLM の提案は元の候補区間の内側かつ長さ制約を満たす場合だけ採用する

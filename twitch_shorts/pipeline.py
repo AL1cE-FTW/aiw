@@ -15,7 +15,7 @@ import numpy as np
 from . import audio as audio_mod
 from .config import Config
 from .detector import detect_highlights, snap_to_transcript
-from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample
+from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample, normalize_hashtag
 from .render import render_highlight
 
 log = logging.getLogger(__name__)
@@ -80,14 +80,28 @@ class RunResult:
     score: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 
-def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
+class _KeepUnknown(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _template_vars(h: Highlight, index: int, channel: str) -> dict:
     top = Counter(s.rsplit(" (x", 1)[0] for s in h.chat_sample).most_common(1)
-    return cfg.render.title_template.format(
-        channel=channel,
-        index=index,
-        date=datetime.now().strftime("%Y-%m-%d"),
-        top_chat=top[0][0] if top else "",
-    ).strip()
+    return {"channel": channel, "index": index, "date": datetime.now().strftime("%Y-%m-%d"),
+            "top_chat": top[0][0] if top else ""}
+
+
+def fill_template(template: str, values: dict) -> str:
+    """{channel} などを埋める。知らない変数や {} の書き間違いがあってもエラーにしない。"""
+    try:
+        return template.format_map(_KeepUnknown(values)).strip()
+    except (ValueError, IndexError, AttributeError, TypeError, KeyError):
+        log.warning("テンプレートを解釈できないため、そのまま使います: %s", template)
+        return template.strip()
+
+
+def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
+    return fill_template(cfg.render.title_template, _template_vars(h, index, channel))
 
 
 def process(
@@ -101,14 +115,23 @@ def process(
     stream_title: str = "",
     exclude: list[Highlight] | None = None,
     available_until: float | None = None,
+    available_from: float | None = None,
     dry_run: bool = False,
     llm_client=None,
     viewers: list[ViewerSample] | None = None,
+    clip_vod: tuple[str, float] | None = None,
+    clip_owner: str | None = None,
+    publish: bool = True,
 ) -> RunResult:
     """ハイライトを検出し、ショート動画を ``run_dir`` に書き出す。
 
     exclude:          既に書き出したハイライト (ライブの逐次処理で重複させないため)
     available_until:  これより後ろにかかる区間は採用しない (録画中のファイル用)
+    available_from:   これより前にかかる区間は採用しない
+    clip_vod:         (VOD の ID, ハイライトの時刻を VOD 上の時刻にするために足す秒数)。
+                      clips.enabled のとき、この VOD から Twitch の公式クリップを作る
+    clip_owner:       VOD の持ち主のチャンネル名 (省略時は channel)。クリップを作れるかの判定に使う
+    publish:          False なら投稿予定表に載せない (配信中のプレビューなど)
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +161,7 @@ def process(
         h for h in candidates
         if not any(h.overlaps(e, margin=5) for e in exclude)
         and (available_until is None or h.end <= available_until)
+        and (available_from is None or h.start >= available_from)
     ]
     candidates = candidates[: n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1)]
     log.info("候補 %d 件を検出", len(candidates))
@@ -173,17 +197,36 @@ def process(
     for i, h in enumerate(selected, start=start_index):
         if not h.title:
             h.title = default_title(cfg, h, i, channel)
+        _fill_post_text(cfg, h, channel, i)
+        if clip_vod:
+            h.vod_url = vod_timestamp_url(clip_vod[0], h.start + clip_vod[1])
         if dry_run:
             continue
-        video, offset = source.video_for(h.start, h.end)
         out = run_dir / f"short_{i:02d}_{_hms(h.start)}.mp4"
         log.info("書き出し中: %s (%s〜%s) %s", out.name, _hms(h.start, ":"), _hms(h.end, ":"), h.title)
-        render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
-                         max_total=cfg.detect.max_duration)
+        try:
+            video, offset = source.video_for(h.start, h.end)
+            render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
+                             max_total=cfg.detect.max_duration)
+        except Exception as e:  # 1 本の失敗 (区間のダウンロード失敗など) で残りを止めない
+            log.warning("書き出しに失敗したため、この 1 本は飛ばします (%s): %s", out.name, e)
+            continue
         h.output_path = str(out)
 
+    # Twitch クリップは書き出せたショートの場面だけ作る (dry-run では作らない)
+    rendered = [h for h in selected if h.output_path]
+    if cfg.clips.enabled and clip_vod and rendered and not dry_run:
+        _make_twitch_clips(cfg, rendered, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
+                           owner=channel if clip_owner is None else clip_owner)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
-    if cfg.publish.enabled and not dry_run:
+    try:
+        from .review import write_review_page
+
+        page = write_review_page(run_dir, selected + exclude, score, duration, channel, stream_title)
+        log.info("確認ページ: %s", page)
+    except OSError as e:
+        log.warning("確認ページを作れませんでした: %s", e)
+    if cfg.publish.enabled and publish and not dry_run:
         from .schedule import add_to_schedule
 
         try:
@@ -192,6 +235,60 @@ def process(
         except (ValueError, KeyError, OSError) as e:  # 設定ミスで書き出し済みの結果を失わないように
             log.warning("投稿予定表に追加できませんでした ([publish] の設定を確認してください): %s", e)
     return RunResult(selected, run_dir, score)
+
+
+def _fill_post_text(cfg: Config, h: Highlight, channel: str, index: int = 1) -> None:
+    """投稿用の説明文・ハッシュタグを補う (AI が付けていればそれを優先)。"""
+    if not h.description:
+        h.description = fill_template(cfg.publish.description_template,
+                                      _template_vars(h, index, channel or "配信"))
+    tags: list[str] = []
+    seen: set[str] = set()
+    for t in map(normalize_hashtag, [*h.hashtags, *cfg.publish.hashtags]):
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            tags.append(t)
+    h.hashtags = tags
+
+
+def vod_timestamp_url(video_id: str, seconds: float) -> str:
+    """VOD の指定位置を開く URL (Twitch の ?t=1h2m3s 形式)。"""
+    from .download import vod_url
+
+    t = max(0, int(seconds))
+    return f"{vod_url(video_id)}?t={t // 3600}h{t % 3600 // 60}m{t % 60}s"
+
+
+def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple[str, float], already: int,
+                       owner: str) -> None:
+    """Twitch の公式クリップを作る。任意の機能なので、失敗してもショートの結果には影響させない。
+
+    owner: VOD の持ち主 (チャンネル名)。ログイン中のアカウントと一致するときだけ作る。
+    """
+    from .twitch_auth import TwitchAuthError, UserToken, can_create_clips
+    from .twitch_clips import ClipCreator, clips_made_for, create_clips
+
+    vod_id, shift = clip_vod
+    registry = Path(cfg.work_dir) / "twitch_clips.json"
+    # 同じ VOD を処理し直した分も含めて、1 配信あたりの上限を守る
+    limit = max(0, cfg.clips.max_per_stream - max(already, clips_made_for(registry, vod_id)))
+    creator = None
+    if limit > 0:
+        try:
+            token = UserToken(cfg.twitch.client_id, cfg.twitch.client_secret, cfg.work_dir)
+            # クリップは、クリップ作成の許可がある配信者本人のアカウントでのみ作る
+            if cfg.twitch.client_id and owner and can_create_clips(token.token, owner):
+                creator = ClipCreator(cfg.twitch.client_id, token)
+            else:
+                log.warning("Twitch クリップは作りません: %s のクリップを作れるログインがありません "
+                            "(配信者本人のアカウントで twitch-shorts login してください)", owner or "この VOD")
+        except TwitchAuthError as e:
+            log.warning("Twitch クリップは作りません: %s", e)
+    try:
+        # 新しく作れない場合も、以前作ったクリップは結び付ける
+        create_clips(creator, vod_id, highlights, shift, limit, registry=registry)
+    except Exception as e:  # 通信エラー等。ショート自体は作れているので続ける
+        log.warning("Twitch クリップを作れませんでした: %s", e)
 
 
 def _hms(t: float, sep: str = "") -> str:

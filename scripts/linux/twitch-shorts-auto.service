@@ -1,0 +1,22 @@
+# systemd ユーザーサービス (Linux)。使い方は docs/GUIDE.md の「PC 起動時に自動で動かす」を参照。
+# WorkingDirectory と ExecStart のパスを、このリポジトリの場所に書き換えてください。
+[Unit]
+Description=twitch-shorts auto mode
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/aiw
+# 仮想環境に入れた streamlink なども見つかるように
+Environment=PATH=%h/aiw/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/aiw/.venv/bin/twitch-shorts auto yuuki_ftw
+Restart=on-failure
+RestartSec=60
+# 停止時は録画済みの分を処理してから終了するので、時間に余裕を持たせる
+TimeoutStopSec=1h
+# 停止の合図は本体だけに送る (書き出し中の ffmpeg まで止めない)
+KillMode=mixed
+# 停止の指示で処理を終えて正常に止まったとき (終了コード 130) を失敗扱いにしない
+SuccessExitStatus=130
+
+[Install]
+WantedBy=default.target

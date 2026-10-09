@@ -2,7 +2,10 @@
 
   twitch-shorts vod <VODのURL/ID>        過去配信(VOD)からショート動画を作る
   twitch-shorts latest <チャンネル>       チャンネルの最新アーカイブを処理 (処理済みはスキップ。cron 向け)
+  twitch-shorts auto <チャンネル>         【おすすめ】起動しておくだけで、配信ごとに自動でショートとクリップを作る
   twitch-shorts watch <チャンネル>        配信を監視して録画し、自動でショート動画を作る
+  twitch-shorts login                   配信者アカウントで Twitch にログイン (公式クリップの自動作成用)
+  twitch-shorts doctor [チャンネル]       必要なものが揃っているか確認する
   twitch-shorts local <動画> --chat <ファイル>  手元の録画ファイルから作る
   twitch-shorts chat <VODのURL/ID>       VOD のチャットを JSONL で保存する
   twitch-shorts analyze <チャンネル>      人気クリップを分析し、レポートと推奨設定を作る
@@ -19,6 +22,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, load_config
+from .fileutil import add_processed_vod, processed_vods
 
 log = logging.getLogger("twitch_shorts")
 
@@ -36,6 +40,8 @@ def _common_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.transcribe.enabled = True
     if getattr(args, "no_subtitles", False):
         cfg.render.subtitles = False
+    if getattr(args, "twitch_clips", False):
+        cfg.clips.enabled = True
 
 
 def _print_result(highlights) -> None:
@@ -59,10 +65,12 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     channel, title, duration, clips = args.channel or "", "", None, []
+    owner = ""  # VOD の持ち主 (クリップを作れるかの判定用)。API で確認できたときだけ分かる
     if cfg.twitch.client_id and cfg.twitch.client_secret:
         helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
         info = helix.get_video(video_id)
         channel, title, duration = channel or info.user_login, info.title, info.duration
+        owner = info.user_login
         if not args.no_clips:
             clips = helix.get_clips_for_video(info)
             log.info("既存クリップ %d 件をシグナルとして使用", len(clips))
@@ -84,8 +92,15 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
 
     src = VodSource(url, work, quality=args.quality, full_download=args.full_download)
     result = process(cfg, src, chat, Path(cfg.output_dir) / f"{channel or 'vod'}_{video_id}",
-                     duration=duration, clips=clips, channel=channel, stream_title=title, dry_run=args.dry_run)
+                     duration=duration, clips=clips, channel=channel, stream_title=title, dry_run=args.dry_run,
+                     clip_vod=(video_id, 0.0),
+                     # API で持ち主を確認できないときは指定されたチャンネルを使う
+                     # (違っていれば Twitch 側が拒否し、1 回で作成をやめる)
+                     clip_owner=owner or channel)
     _print_result(result.highlights)
+    if not args.dry_run and result.highlights and not any(h.output_path for h in result.highlights):
+        log.error("ショートを 1 本も書き出せませんでした (ディスクの空きやネットワークを確認してください)")
+        return 1
     return 0
 
 
@@ -97,19 +112,84 @@ def cmd_latest(cfg: Config, args: argparse.Namespace) -> int:
         return 2
     helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
     videos = helix.get_recent_archives(helix.get_user_id(args.channel), args.count)
-    state_path = Path(cfg.work_dir) / "processed_vods.json"
-    done = set(json.loads(state_path.read_text())) if state_path.exists() else set()
+    live = helix.get_stream(args.channel)
     for v in reversed(videos):
-        if v.id in done and not args.force:
+        if live and _is_current_stream(v, live):
+            # 配信中の VOD は途中までしか無い。処理済みにすると残りが作られないので、配信が終わってから作る
+            log.info("配信中のため、配信が終わってから作ります: %s %s", v.id, v.title)
+            continue
+        # auto / watch で作った VOD もここに記録される
+        if v.id in processed_vods(cfg.work_dir) and not args.force:
             log.info("処理済みのためスキップ: %s %s", v.id, v.title)
             continue
         log.info("処理開始: %s %s", v.id, v.title)
         args.vod, args.chat = v.id, None
         args.channel = args.channel.lower()
-        cmd_vod(cfg, args)
+        if cmd_vod(cfg, args) != 0:
+            log.warning("作れなかったため、次回もう一度試します: %s", v.id)
+            continue
         if not args.dry_run:
-            done.add(v.id)
-            state_path.write_text(json.dumps(sorted(done)))
+            add_processed_vod(cfg.work_dir, v.id)
+    return 0
+
+
+def _is_current_stream(video, stream: dict) -> bool:
+    from .twitch_api import parse_rfc3339
+
+    try:
+        return abs(video.created_at.timestamp() - parse_rfc3339(stream["started_at"]).timestamp()) <= 600
+    except (KeyError, TypeError, ValueError):
+        return True  # 分からなければ、安全側 (配信中とみなして後回し) に倒す
+
+
+def cmd_login(cfg: Config, args: argparse.Namespace) -> int:
+    from .twitch_auth import TwitchAuthError, device_login
+
+    try:
+        token = device_login(cfg.twitch.client_id, cfg.twitch.client_secret, cfg.work_dir)
+    except TwitchAuthError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"{token['login']} でログインしました。auto / watch / vod でクリップも自動で作れます。")
+    return 0
+
+
+def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
+    from .doctor import print_checks, run_checks
+
+    print("動作に必要なものを確認しています…")
+    ok = print_checks(run_checks(cfg, (args.channel or "").lower(), online=bool(args.channel)))
+    print("準備OKです。" if ok else "NG の項目を準備してください (README / docs/GUIDE.md 参照)。")
+    return 0 if ok else 1
+
+
+def cmd_auto(cfg: Config, args: argparse.Namespace) -> int:
+    """配信の検知 → 録画 → ショート作成 (+ Twitch クリップ作成) → 次の配信を待つ、を繰り返す。"""
+    from .doctor import print_checks, run_checks
+    from .twitch_auth import can_create_clips, load_token
+    from .watcher import watch
+
+    channel = args.channel.lower()
+    print(f"twitch-shorts 自動モード: {channel}")
+    if not print_checks(run_checks(cfg, channel)):
+        print("必須の項目 (NG) を準備してから、もう一度起動してください。", file=sys.stderr)
+        return 1
+    token = load_token(cfg.work_dir)
+    has_keys = bool(cfg.twitch.client_id and cfg.twitch.client_secret)
+    if args.no_twitch_clips:
+        cfg.clips.enabled = False
+    elif has_keys and can_create_clips(token, channel):
+        cfg.clips.enabled = True
+    else:
+        if cfg.clips.enabled or token:
+            print("※ Twitch クリップは作りません (API キーと、このチャンネルの配信者アカウントでの "
+                  "twitch-shorts login が必要です)")
+        cfg.clips.enabled = False
+    if args.rolling is not None:
+        cfg.watch.rolling_minutes = args.rolling
+    print("配信が始まると自動で録画し、終わったらショート動画"
+          + ("と Twitch クリップ" if cfg.clips.enabled else "") + "を作ります。止めるときは Ctrl+C。")
+    watch(cfg, channel, dry_run=args.dry_run)
     return 0
 
 
@@ -118,7 +198,7 @@ def cmd_watch(cfg: Config, args: argparse.Namespace) -> int:
 
     if args.rolling is not None:
         cfg.watch.rolling_minutes = args.rolling
-    watch(cfg, args.channel.lower(), once=args.once)
+    watch(cfg, args.channel.lower(), once=args.once, dry_run=args.dry_run)
     return 0
 
 
@@ -232,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
-    def add_render_opts(sp):
+    def add_render_opts(sp, twitch_clips: bool = True):
         sp.add_argument("-o", "--output", help="出力ディレクトリ")
         sp.add_argument("-n", "--top", type=int, help="作成するショート動画の本数")
         sp.add_argument("--layout", choices=["blur", "crop", "facecam"])
@@ -240,6 +320,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--transcribe", action="store_true", help="faster-whisper で字幕を付ける")
         sp.add_argument("--no-subtitles", action="store_true")
         sp.add_argument("--dry-run", action="store_true", help="検出だけ行い動画は作らない")
+        if twitch_clips:
+            sp.add_argument("--twitch-clips", action="store_true",
+                            help="検出した場面を Twitch の公式クリップとしても作る (要 login)")
 
     sp = sub.add_parser("vod", help="VOD からショート動画を作る")
     sp.add_argument("vod", help="VOD の URL または ID")
@@ -261,6 +344,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_render_opts(sp)
     sp.set_defaults(func=cmd_latest)
 
+    sp = sub.add_parser("auto", help="【おすすめ】起動しておくだけで配信ごとに自動でショートとクリップを作る")
+    sp.add_argument("channel")
+    sp.add_argument("--rolling", type=int, help="配信中も N 分ごとに作る (同じ PC で配信している場合は 0 推奨)")
+    sp.add_argument("--no-twitch-clips", action="store_true", help="Twitch の公式クリップは作らない")
+    add_render_opts(sp, twitch_clips=False)  # auto はログイン状態から自動で決める
+    sp.set_defaults(func=cmd_auto)
+
+    sp = sub.add_parser("login", help="配信者アカウントで Twitch にログイン (公式クリップの自動作成用)")
+    sp.set_defaults(func=cmd_login)
+
+    sp = sub.add_parser("doctor", help="必要なものが揃っているか確認する")
+    sp.add_argument("channel", nargs="?", help="指定すると Twitch API への接続も確認")
+    sp.set_defaults(func=cmd_doctor)
+
     sp = sub.add_parser("watch", help="配信を監視して自動で録画・切り抜き")
     sp.add_argument("channel")
     sp.add_argument("--once", action="store_true", help="1 回の配信を処理したら終了")
@@ -276,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--channel")
     sp.add_argument("--title", help="配信タイトル (LLM への文脈)")
     sp.add_argument("--name", help="出力サブディレクトリ名")
-    add_render_opts(sp)
+    add_render_opts(sp, twitch_clips=False)  # 手元のファイルには VOD が無いのでクリップは作れない
     sp.set_defaults(func=cmd_local)
 
     sp = sub.add_parser("analyze", help="人気クリップを分析し、レポートと推奨設定を作る")

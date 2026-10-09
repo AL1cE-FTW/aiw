@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 
@@ -41,6 +42,16 @@ DEFAULT_KEYWORDS: dict[str, float] = {
     "wtf": 1.0,
     "gg": 0.5,
 }
+
+
+def default_font(platform: str | None = None) -> str:
+    """OS に最初から入っている日本語フォント (字幕・タイトル用)。"""
+    platform = platform or sys.platform
+    if platform.startswith("win"):
+        return "Yu Gothic"
+    if platform == "darwin":
+        return "Hiragino Sans"
+    return "Noto Sans CJK JP"
 
 
 @dataclass
@@ -92,7 +103,7 @@ class RenderConfig:
     facecam_height_ratio: float = 0.35
     title: bool = True
     subtitles: bool = True
-    font: str = "Noto Sans CJK JP"
+    font: str = field(default_factory=lambda: default_font())
     fonts_dir: str = ""
     title_font_size: int = 72
     subtitle_font_size: int = 80
@@ -140,8 +151,18 @@ class WatchConfig:
     rolling_minutes: int = 0
     # 同時視聴者数を記録する間隔 (秒)。Twitch API の認証情報がある場合のみ記録する
     viewer_poll_interval: int = 60
+    # 録画 (HLS) が実際の配信から遅れて届く秒数の目安。録画の位置を VOD の位置に直すときに使う
+    stream_latency: float = 8.0
     recorder: str = "auto"  # auto / streamlink / yt-dlp
     quality: str = "best"
+
+
+@dataclass
+class ClipsConfig:
+    """検出した場面を Twitch の公式クリップとしても作る (要 twitch-shorts login)。"""
+
+    enabled: bool = False
+    max_per_stream: int = 5
 
 
 @dataclass
@@ -152,6 +173,9 @@ class PublishConfig:
     post_time: str = "19:00"
     posts_per_day: int = 1
     timezone: str = "Asia/Tokyo"
+    # 投稿用のハッシュタグ (AI が付けたものに足す) と、AI を使わないときの説明文
+    hashtags: list[str] = field(default_factory=lambda: ["#shorts", "#Twitch切り抜き"])
+    description_template: str = "{channel} の Twitch 配信から切り抜きました。"
 
 
 @dataclass
@@ -165,6 +189,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
+    clips: ClipsConfig = field(default_factory=ClipsConfig)
 
 
 def _apply(obj, data: dict, path: str = "") -> None:
@@ -182,6 +207,12 @@ def _apply(obj, data: dict, path: str = "") -> None:
             merged = dict(current)
             merged.update({str(k).lower(): float(v) for k, v in value.items()})
             setattr(obj, key, {k: v for k, v in merged.items() if v != 0})
+        elif isinstance(current, list) and not isinstance(value, list):
+            # 文字列のリストの項目は "#a #b" のように 1 つの文字列で書かれても受け付ける
+            if isinstance(value, str) and all(isinstance(x, str) for x in current):
+                setattr(obj, key, value.split())
+            else:
+                raise ValueError(f"{path}{key} は [...] のリストで指定してください")
         else:
             setattr(obj, key, value)
 

@@ -31,6 +31,9 @@ def test_record_and_process_with_mocked_stream(make_stream, tmp_path, monkeypatc
     cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
     cfg.render.width, cfg.render.height = 360, 640
     class FakeHelix:
+        def is_live(self, login):
+            return False
+
         def get_stream(self, login):
             return {"viewer_count": 12}
 
@@ -50,7 +53,7 @@ def test_wait_until_live_polls(monkeypatch):
             return next(states)
 
     sleeps = []
-    monkeypatch.setattr(watcher.time, "sleep", sleeps.append)
+    monkeypatch.setattr(watcher, "_sleep_checking_stop", sleeps.append)
     cfg = Config()
     watcher.wait_until_live(cfg, "yuuki_ftw", Checker())
     assert sleeps == [cfg.watch.poll_interval] * 2

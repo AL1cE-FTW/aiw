@@ -76,15 +76,21 @@ def download_section(url: str, start: float, end: float, out_path: str | Path, q
 
 
 def is_live_via_ytdlp(channel: str) -> bool:
-    """API キー無しで配信中か調べる (オフラインだと yt-dlp がエラーを返す)。"""
+    """API キー無しで配信中か調べる (オフラインだと yt-dlp がエラーを返す)。
+
+    「オフライン」以外のエラー (通信の不調など) は例外のまま返す (呼び出し側で「分からない」として扱うため)。
+    """
     from yt_dlp.utils import DownloadError
 
     try:
         with _ydl({"skip_download": True}) as ydl:
             info = ydl.extract_info(channel_url(channel), download=False)
         return bool(info and info.get("is_live", True))
-    except DownloadError:
-        return False
+    except DownloadError as e:
+        msg = str(e).lower()
+        if "offline" in msg or "not currently live" in msg or "does not exist" in msg:
+            return False
+        raise
 
 
 def start_live_recording(channel: str, out_path: str | Path, recorder: str = "auto",
@@ -96,9 +102,25 @@ def start_live_recording(channel: str, out_path: str | Path, recorder: str = "au
     out_path = str(out_path)
     use_streamlink = recorder == "streamlink" or (recorder == "auto" and shutil.which("streamlink"))
     if use_streamlink:
+        # 広告は録画しない (広告の映像がショートになると権利上の問題になる)。広告を飛ばした分だけ
+        # 録画は短くなるが、配信後の最終処理は広告の無い VOD から行うので位置はずれない
         cmd = ["streamlink", "--twitch-disable-ads", "--force", "-o", out_path, channel_url(channel), quality]
     else:
         cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-part", "--hls-use-mpegts",
                "-f", quality, "-o", out_path, channel_url(channel)]
     log.info("録画開始: %s", " ".join(cmd))
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # 録画ツールのメッセージはファイルに書き出す (パイプのままだと、読まずにいると溜まって録画が止まるため)
+    log_path = Path(out_path).with_suffix(".log")
+    with open(log_path, "ab") as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err)
+    proc.log_path = log_path
+    return proc
+
+
+def recorder_log_tail(proc, size: int = 500) -> str:
+    """録画ツールのメッセージの末尾 (録画が止まった理由を調べるため)。"""
+    path = getattr(proc, "log_path", None)
+    try:
+        return Path(path).read_bytes()[-size:].decode(errors="replace") if path else ""
+    except OSError:
+        return ""
