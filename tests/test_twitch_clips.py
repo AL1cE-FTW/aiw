@@ -1924,6 +1924,35 @@ def test_hand_edited_schedule_rows_are_skipped(tmp_path):
     assert [e["path"] for e in load_schedule(cfg)] == ["a.mp4"]
     h = Highlight(start=10, end=40, peak=20, score=1.0, title="t", output_path=str(tmp_path / "c.mp4"))
     assert add_to_schedule(cfg, [h], "ch")
+    rows = _json.loads((tmp_path / "out" / "schedule.json").read_text(encoding="utf-8"))
+    assert "壊れた行" in rows and {"publish_at": "あした", "path": "b.mp4"} in rows  # 手で書いた行は消さない
+
+
+def test_schedule_rows_without_timezone_or_title_are_skipped(tmp_path):
+    import json as _json
+
+    from twitch_shorts.schedule import load_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "schedule.json").write_text(_json.dumps(
+        [{"publish_at": "2026-10-10T19:00:00", "path": "a.mp4", "title": "a"},
+         {"publish_at": "2026-10-10T19:00:00+09:00", "path": "b.mp4"}]), encoding="utf-8-sig")
+    assert load_schedule(cfg) == []
+
+
+def test_feedback_tolerates_bom_schedule(tmp_path):
+    import json as _json
+
+    from twitch_shorts.youtube_feedback import our_shorts
+
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "schedule.json").write_text(_json.dumps(
+        [{"publish_at": "2026-10-10T19:00:00+09:00", "path": "a.mp4", "title": "a"}]), encoding="utf-8-sig")
+    (tmp_path / "out" / "x").mkdir()
+    (tmp_path / "out" / "x" / "highlights.json").write_text("[1, 2]", encoding="utf-8")
+    assert [o["path"] for o in our_shorts(cfg)] == ["a.mp4"]
 
 
 def test_broken_schedule_is_kept_aside(tmp_path):

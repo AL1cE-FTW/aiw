@@ -26,20 +26,18 @@ def _paths(cfg: Config) -> tuple[Path, Path]:
     return out / SCHEDULE_JSON, out / SCHEDULE_CSV
 
 
-def load_schedule(cfg: Config, for_update: bool = False) -> list[dict]:
-    """投稿予定表を読む。for_update (ロック中に書き足す前): 壊れていたら別名に移して作り直す。"""
+def load_schedule(cfg: Config) -> list[dict]:
+    """投稿予定表の有効な行 (手で編集して形の崩れた行は飛ばす)。"""
     path, _ = _paths(cfg)
-    data = read_list_for_update(path) if for_update else read_json(path, [])
+    data = read_json(path, [])
     return [e for e in data if _valid_entry(e)] if isinstance(data, list) else []
 
 
 def _valid_entry(e) -> bool:
-    """手で編集して形の崩れた行は飛ばす。"""
-    if not isinstance(e, dict) or not isinstance(e.get("path"), str):
+    if not isinstance(e, dict) or not isinstance(e.get("path"), str) or not isinstance(e.get("title"), str):
         return False
     try:
-        datetime.fromisoformat(e["publish_at"])
-        return True
+        return datetime.fromisoformat(e["publish_at"]).tzinfo is not None  # 時差の無い日時は比べられない
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -64,7 +62,10 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
                      now: datetime | None) -> list[dict]:
     tz = ZoneInfo(cfg.publish.timezone)
     now = (now or datetime.now(tz)).astimezone(tz)
-    entries = load_schedule(cfg, for_update=True)
+    # 壊れていれば別名に移して作り直す。形の崩れた行は計算には使わないが、消さずに書き戻す
+    raw = read_list_for_update(_paths(cfg)[0])
+    entries = [e for e in raw if _valid_entry(e)]
+    invalid = [e for e in raw if not _valid_entry(e)]
     known = {e["path"] for e in entries}
     used = Counter(datetime.fromisoformat(e["publish_at"]).astimezone(tz).isoformat() for e in entries)
 
@@ -103,7 +104,7 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
     entries.sort(key=lambda e: e["publish_at"])
     json_path, csv_path = _paths(cfg)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(json_path, entries)  # 逐次処理のたびに書き換えるので、途中で止まっても壊れないように
+    write_json_atomic(json_path, entries + invalid)  # 逐次処理のたびに書き換えるので、途中で止まっても壊れないように
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=["publish_at", "title", "hook", "category", "description", "hashtags",
                                         "channel", "score", "duration", "path", "twitch_clip"],

@@ -23,6 +23,8 @@ from pathlib import Path
 
 from .analytics import SIGNAL_NAMES, overrides_toml
 from .config import Config
+from .fileutil import read_json
+from .schedule import load_schedule
 
 # 列名の候補 (小文字・空白正規化後)。完全一致を優先し、無ければ部分一致で探す
 COLUMN_ALIASES: dict[str, list[str]] = {
@@ -158,20 +160,16 @@ def our_shorts(cfg: Config) -> list[dict]:
     items: dict[str, dict] = {}
     out = Path(cfg.output_dir)
     for hj in out.glob("**/highlights.json"):
-        try:
-            data = json.loads(hj.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for h in data.get("highlights", []):
-            if h.get("output_path") and h.get("title"):
+        data = read_json(hj, {})
+        items_ = data.get("highlights", []) if isinstance(data, dict) else []
+        for h in items_ if isinstance(items_, list) else []:
+            if isinstance(h, dict) and h.get("output_path") and h.get("title"):
                 items[h["output_path"]] = {"title": h["title"], "path": h["output_path"],
                                            "signals": h.get("signals", {}), "hook": h.get("hook", ""),
                                            "duration": h.get("video_duration") or h.get("duration")}
-    sched = out / "schedule.json"
-    if sched.exists():
-        for e in json.loads(sched.read_text(encoding="utf-8")):
-            items.setdefault(e["path"], {"title": e["title"], "path": e["path"], "signals": e.get("signals", {}),
-                                         "hook": e.get("hook", ""), "duration": e.get("duration")})
+    for e in load_schedule(cfg):
+        items.setdefault(e["path"], {"title": e["title"], "path": e["path"], "signals": e.get("signals", {}),
+                                     "hook": e.get("hook", ""), "duration": e.get("duration")})
     return list(items.values())
 
 
