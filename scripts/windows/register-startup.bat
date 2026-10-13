@@ -1,6 +1,7 @@
 @echo off
 rem Register twitch-shorts auto mode to run when you sign in to Windows.
 rem Usage: register-startup.bat [channel]   (default: yuuki_ftw)
+rem To switch it ON / OFF with one file, use toggle-startup.bat instead.
 rem To unregister, delete "twitch-shorts-auto.lnk" from the Startup folder (Win+R -> shell:startup).
 set "TS_CHANNEL=%~1"
 if "%TS_CHANNEL%"=="" set "TS_CHANNEL=yuuki_ftw"

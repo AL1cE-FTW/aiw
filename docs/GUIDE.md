@@ -176,10 +176,15 @@ twitch-shorts auto yuuki_ftw
 
 ### PC の起動時に自動で立ち上げる
 
-**Windows**: エクスプローラーで `scripts\windows\register-startup.bat` をダブルクリック。
-次回のサインインから自動で `auto` が起動します (最小化されたウィンドウで動きます)。
-やめるときは `Win + R` → `shell:startup` で開いたフォルダーの `twitch-shorts-auto` (ショートカット) を削除します。
-すぐに起動したいときは `scripts\windows\start-auto.bat` をダブルクリックします。
+**Windows**: エクスプローラーで `scripts\windows\toggle-startup.bat` をダブルクリックするたびに、
+自動起動の **ON / OFF が切り替わります** (どちらになったかが表示されます)。
+
+- **ON**: 次回のサインインから自動で `auto` が起動します (最小化されたウィンドウで動きます)
+- **OFF**: 自動では起動しなくなります。いま動いている `auto` のウィンドウは、閉じれば止まります
+- すぐに起動したいときは `scripts\windows\start-auto.bat` をダブルクリック
+- 状態を確かめたいときは `Win + R` → `shell:startup` で開いたフォルダーに `twitch-shorts-auto` があれば ON
+
+(`register-startup.bat` は ON にするだけの以前の版です。)
 
 **Mac**: システム設定 → 一般 → ログイン項目 → 「+」で `scripts/mac/start-auto.command` を追加。
 
