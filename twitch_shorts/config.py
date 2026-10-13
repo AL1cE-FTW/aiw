@@ -180,6 +180,17 @@ class ClipsConfig:
 
 
 @dataclass
+class WebConfig:
+    """配信後に見つけた場面の一覧を Web ページ (Cloudflare に置く worker/) に送る。
+
+    ページでは Twitch でログインして、各場面のクリップをボタン 1 つで作れる。
+    """
+
+    url: str = ""           # 例: https://aiw.<アカウント>.workers.dev
+    upload_token: str = ""  # Cloudflare 側の UPLOAD_TOKEN と同じ文字列 (環境変数 AIW_UPLOAD_TOKEN でも可)
+
+
+@dataclass
 class PublishConfig:
     """投稿予定表 (参考: タルレミ・エラ「OW動画投稿講座」— 毎日同じ時間に投稿、解説系以外は 1 日 1 本まで)。"""
 
@@ -204,6 +215,7 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
     clips: ClipsConfig = field(default_factory=ClipsConfig)
+    web: WebConfig = field(default_factory=WebConfig)
 
 
 def _apply(obj, data: dict, path: str = "") -> None:
@@ -243,6 +255,7 @@ def load_config(path: str | os.PathLike | list | None = None) -> Config:
     cfg.twitch.client_id = os.environ.get("TWITCH_CLIENT_ID", cfg.twitch.client_id)
     cfg.twitch.client_secret = os.environ.get("TWITCH_CLIENT_SECRET", cfg.twitch.client_secret)
     cfg.twitch.irc_oauth_token = os.environ.get("TWITCH_IRC_TOKEN", cfg.twitch.irc_oauth_token)
+    cfg.web.upload_token = os.environ.get("AIW_UPLOAD_TOKEN", cfg.web.upload_token)
     cfg.detect.keywords = {k.lower(): v for k, v in cfg.detect.keywords.items()}
     # AI を使う設定なのに provider を書き間違えていたら、気付かないまま AI 無しで動き続けないよう読み込んだ時点で止める
     try:

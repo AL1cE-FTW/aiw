@@ -226,6 +226,35 @@ YouTube Studio や TikTok の予約投稿にこの順番で登録していくの
 > Twitch のクリップ作成 API (VOD からのクリップ) はオープンベータのため、仕様が変わる可能性があります。
 > また、位置が数秒ずれることがあると報告されています。
 
+### 切り抜き候補ページ (Cloudflare・任意)
+
+配信が終わると、見つけた場面の一覧 (ショートにした場面と次点の候補) が Web ページに送られます。
+スマホからでも開けて、**Twitch でログインした配信者だけ**が見られます。各場面の「クリップを作る」を押すと、
+その配信の VOD から Twitch クリップが作られます。自動で作られたクリップ以外の場面を、自分で選んで追加できます。
+
+ページは Cloudflare Workers に無料で置けます (このリポジトリの `worker/` と `wrangler.toml`)。初回の準備:
+
+1. **Cloudflare にデプロイ**: Cloudflare のダッシュボード → Workers & Pages → 作成 → GitHub のこのリポジトリを連携
+   (デプロイコマンドは `npx wrangler deploy`)。push のたびに自動で更新されます。
+   保存用の KV は初回のデプロイで自動で作られます。ページの URL は `https://aiw.<アカウント>.workers.dev` です
+2. **シークレットを登録**: Workers & Pages → aiw → 設定 → 変数とシークレット で、種類「シークレット」で 4 つ追加:
+   - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`: 2-3 で作った Twitch アプリのもの
+   - `UPLOAD_TOKEN`: 長いランダムな文字列 (PowerShell で `[guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")`)
+   - `SESSION_SECRET`: 同じ方法で作った、別のランダムな文字列
+3. **Twitch アプリにページの URL を登録**: [Twitch Developer Console](https://dev.twitch.tv/console) → アプリの「管理」→
+   OAuth のリダイレクト URL に `https://aiw.<アカウント>.workers.dev/callback` を追加
+4. **ログイン**: ページを開いて「Twitch でログイン」→ 配信者のアカウントで「許可」
+   (ほかのアカウントでは使えません。使えるアカウントは `wrangler.toml` の `ALLOWED_LOGIN`)
+5. **このツールから送る設定** (`config.toml`):
+   ```toml
+   [web]
+   url = "https://aiw.<アカウント>.workers.dev"
+   upload_token = "2 の UPLOAD_TOKEN と同じ文字列"
+   ```
+
+一覧が送られるのは、VOD から作ったとき (`auto` / `watch` の配信後の処理、`vod`、`latest`) だけです。
+VOD が無い場合はクリップを作れないので送りません。ページには直近 50 回分が残ります。
+
 ---
 
 ## 5. 手動で使うコマンド
