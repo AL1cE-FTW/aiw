@@ -2025,3 +2025,103 @@ def test_latest_does_not_mark_vod_when_nothing_rendered(tmp_path, monkeypatch):
     cfg.twitch.client_id, cfg.twitch.client_secret = "id", "secret"
     cli.cmd_latest(cfg, argparse.Namespace(channel="ch", count=1, force=False, dry_run=False))
     assert processed_vods(cfg.work_dir) == set()
+
+
+# --- [watch] record = false -------------------------------------------------
+
+def test_no_record_mode_keeps_chat_and_uses_vod(tmp_path, monkeypatch):
+    answers = iter([True, False, False])  # 配信中 → 終了 (_NoRecorder) → 終了の確認
+
+    class Helix:
+        def is_live(self, channel):
+            return next(answers)
+
+        def get_stream(self, channel):
+            return None
+
+    monkeypatch.setattr(watcher, "start_live_recording", lambda *a: pytest.fail("録画しない設定なのに録画した"))
+    chats = []
+    monkeypatch.setattr(watcher, "LiveChatRecorder", lambda *a, **k: chats.append(1) or type("C", (), {
+        "start": lambda s: None, "stop": lambda s: None, "count": 0})())
+    monkeypatch.setattr(watcher, "ViewerRecorder", lambda *a, **k: type("V", (), {
+        "start": lambda s: None, "stop": lambda s: None})())
+    monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
+    clock = [1000.0]
+    monkeypatch.setattr(watcher.time, "time", lambda: clock.__setitem__(0, clock[0] + 30) or clock[0])
+    finals = []
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: finals.append(k.get("vod_complete")) or [])
+    cfg = Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w"))
+    cfg.watch.record = False
+    watcher.record_and_process(cfg, "ch", helix=Helix())
+    assert chats == [1] and finals == [True]
+
+
+def test_no_record_mode_falls_back_to_recording_without_api(tmp_path, monkeypatch):
+    started = []
+
+    class Proc:
+        returncode = 0
+        stderr = None
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+    def fake_start(channel, path, *a):
+        started.append(path.name)
+        path.write_bytes(b"x")
+        return Proc()
+
+    monkeypatch.setattr(watcher, "start_live_recording", fake_start)
+    monkeypatch.setattr(watcher, "LiveChatRecorder", lambda *a, **k: type("C", (), {
+        "start": lambda s: None, "stop": lambda s: None, "count": 0})())
+    monkeypatch.setattr(watcher.time, "sleep", lambda s: None)
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: [])
+    cfg = Config(output_dir=str(tmp_path / "o"), work_dir=str(tmp_path / "w"))
+    cfg.watch.record = False
+    watcher.record_and_process(cfg, "ch")  # API キー無し
+    assert started == ["stream.ts"]
+
+
+def test_no_record_session_length_comes_from_meta_or_chat(tmp_path):
+    import json as _json
+
+    s = tmp_path / "s"
+    s.mkdir()
+    watcher._save_parts(s, [(s / "stream.ts", 0.0)])  # 録画ファイルは無い
+    (s / "chat.jsonl").write_text(_json.dumps({"offset": 1234.5, "user": "a", "text": "x"}) + "\n", encoding="utf-8")
+    assert watcher._session_length(s) == 1234.5  # 途中で止まった場合はチャットの最後まで
+    watcher._save_meta(s, start_time=1000.0, end_time=4600.0)
+    assert watcher._session_length(s) == 3600.0
+
+
+def test_crashed_no_record_session_length_uses_last_write(tmp_path):
+    import os
+    import time as _time
+
+    s = tmp_path / "s"
+    s.mkdir()
+    watcher._save_parts(s, [(s / "stream.ts", 0.0)])
+    (s / "chat.jsonl").write_text("", encoding="utf-8")  # チャットは無かった
+    now = _time.time()
+    watcher._save_meta(s, start_time=now - 7200)
+    os.utime(s / "chat.jsonl", (now - 600, now - 600))  # 止まる 10 分前まで記録していた
+    assert 6500 < watcher._session_length(s) < 6700
+
+
+def test_no_record_leftover_is_retried_longer(tmp_path, monkeypatch):
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    s = tmp_path / "work" / "yuuki_ftw" / "s1"
+    s.mkdir(parents=True)
+    watcher._save_parts(s, [(s / "stream.ts", 0.0)])
+    watcher._save_meta(s, start_time=1000.0)
+    runs = []
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: runs.append(1) or None)  # VOD がまだ無い
+    for _ in range(8):
+        watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
+    assert len(runs) == watcher.MAX_LEFTOVER_ATTEMPTS_NO_RECORDING

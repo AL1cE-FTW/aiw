@@ -169,6 +169,9 @@ class WatchConfig:
     stream_latency: float = 8.0
     recorder: str = "auto"  # auto / streamlink / yt-dlp
     quality: str = "best"
+    # False なら配信中は録画せず、チャットと同時視聴者数だけを記録する (配信 PC の回線を使わない)。
+    # 配信後は VOD から作るので、Twitch の「過去の配信を保存」と API キー (client_id / secret) が必要
+    record: bool = True
 
 
 @dataclass

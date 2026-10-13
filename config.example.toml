@@ -63,6 +63,8 @@ rolling_minutes = 0     # >0 で配信中も N 分ごとにショートを作る
 viewer_poll_interval = 60  # 同時視聴者数を記録する間隔 (秒)
 recorder = "auto"       # auto (streamlink があれば優先) / streamlink / yt-dlp
 quality = "best"
+record = true           # false: 配信中は録画せず、チャットと視聴者数だけ記録 (配信 PC の回線を使わない)。
+                        #        配信後は VOD から作るので「過去の配信を保存」と API キーが必要
 
 [publish]
 # 作ったショートを「毎日同じ時刻に 1 本」の投稿予定表 (output/schedule.csv) に並べる
