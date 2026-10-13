@@ -252,8 +252,9 @@ Twitch への通信部分はモックでテストしています。
 - VOD チャットを GQL で `contentOffsetSeconds` によりページングする方式: twitch-vod-lib
   <https://pypi.org/project/twitch-vod-lib/>
 - Claude API (構造化出力 `output_config.format`、`fallbacks`): Anthropic 公式 SDK ドキュメント
-- Gemini API (`google-genai` の `generate_content`、`response_json_schema`): Google Gen AI Python SDK
   <https://platform.claude.com/docs>
+- Gemini API (`google-genai` の `generate_content`、`response_json_schema`): Google Gen AI Python SDK
+  <https://github.com/googleapis/python-genai>
 - yt-dlp (`download_ranges` による区間ダウンロード): <https://github.com/yt-dlp/yt-dlp>
 - faster-whisper: <https://github.com/SYSTRAN/faster-whisper>
 - ショートの型 (冒頭 3 秒・配置固定・テロップ位置と文字数・投稿頻度・見るべき指標): タルレミ・エラ

@@ -134,6 +134,9 @@ class TranscribeConfig:
     compute_type: str = "int8"
 
 
+LLM_PROVIDERS = ("claude", "gemini")
+
+
 @dataclass
 class LLMConfig:
     enabled: bool = False
@@ -233,4 +236,8 @@ def load_config(path: str | os.PathLike | list | None = None) -> Config:
     cfg.twitch.client_secret = os.environ.get("TWITCH_CLIENT_SECRET", cfg.twitch.client_secret)
     cfg.twitch.irc_oauth_token = os.environ.get("TWITCH_IRC_TOKEN", cfg.twitch.irc_oauth_token)
     cfg.detect.keywords = {k.lower(): v for k, v in cfg.detect.keywords.items()}
+    # 書き間違いに気付かないまま AI 無しで動き続けないよう、読み込んだ時点で止める
+    cfg.llm.provider = (cfg.llm.provider or "claude").strip().lower()
+    if cfg.llm.provider not in LLM_PROVIDERS:
+        raise ValueError(f"[llm] provider は {' / '.join(LLM_PROVIDERS)} のどれかにしてください: {cfg.llm.provider}")
     return cfg

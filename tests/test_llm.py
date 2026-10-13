@@ -126,3 +126,16 @@ def test_unknown_provider_is_reported():
 
     with pytest.raises(ValueError):
         rerank_with_llm(_cands(), LLMConfig(provider="chatgpt"), "c", "", 15, 59, client=object())
+
+
+def test_misspelled_provider_stops_at_config_load(tmp_path):
+    import pytest
+
+    from twitch_shorts.config import load_config
+
+    p = tmp_path / "config.toml"
+    p.write_text('[llm]\nenabled = true\nprovider = "Gemni"\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(str(p))
+    p.write_text('[llm]\nprovider = " Gemini "\n', encoding="utf-8")
+    assert load_config(str(p)).llm.provider == "gemini"

@@ -92,7 +92,8 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
     if (cfg.llm.provider or "").strip().lower() == "gemini":
         llm = _has_module("google.genai") and bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         checks.append(Check("AI タイトル・引きの言葉 (Gemini)", llm,
-                            "使える" if llm else "任意: pip install 'twitch-shorts[gemini]' と GEMINI_API_KEY",
+                            "使える" if llm else "任意: pip install 'twitch-shorts[gemini]' と GEMINI_API_KEY"
+                            " (または GOOGLE_API_KEY。両方あるときは GOOGLE_API_KEY が使われる)",
                             required=False))
     else:
         llm = _has_module("anthropic") and bool(os.environ.get("ANTHROPIC_API_KEY"))

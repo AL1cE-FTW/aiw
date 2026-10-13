@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 import logging
 
-from .config import LLMConfig
+from .config import LLM_PROVIDERS, LLMConfig
 from .models import Highlight, normalize_hashtag
 
 log = logging.getLogger(__name__)
 
-PROVIDERS = ("claude", "gemini")
+PROVIDERS = LLM_PROVIDERS
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "gemini": "gemini-flash-latest"}
 
 # 場面の種類 (参考: KumoMoments の funny / clutch / wholesome / lore)
@@ -172,7 +172,8 @@ def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None) ->
             "system_instruction": system,
             "response_mime_type": "application/json",
             "response_json_schema": RESULT_SCHEMA,
-            "max_output_tokens": 16000,
+            # Gemini の Flash は考える分のトークンもこの上限に含まれるので、余裕を持たせる
+            "max_output_tokens": 32768,
         },
     )
     candidate = (getattr(response, "candidates", None) or [None])[0]

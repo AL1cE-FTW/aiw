@@ -409,7 +409,11 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
     config_path = args.config or (["config.toml"] if Path("config.toml").exists() else None)
-    cfg = load_config(config_path)
+    try:
+        cfg = load_config(config_path)
+    except ValueError as e:  # 設定の書き間違い
+        print(f"config.toml の設定に誤りがあります: {e}", file=sys.stderr)
+        return 2
     _common_overrides(cfg, args)
     try:
         return args.func(cfg, args)
