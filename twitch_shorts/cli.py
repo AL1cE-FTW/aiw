@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, load_config, normalize_provider
-from .fileutil import add_processed_vod, processed_vods
+from .fileutil import add_processed_vod, file_lock, processed_vods
 
 log = logging.getLogger("twitch_shorts")
 
@@ -142,6 +142,12 @@ def _is_current_stream(video, stream: dict) -> bool:
         return True  # 分からなければ、安全側 (配信中とみなして後回し) に倒す
 
 
+def cmd_tray(cfg: Config, args: argparse.Namespace) -> int:
+    from .tray import run_tray
+
+    return run_tray(args.channel.lower(), cfg.work_dir, cfg.output_dir, args.config)
+
+
 def cmd_login(cfg: Config, args: argparse.Namespace) -> int:
     from .twitch_auth import TwitchAuthError, device_login
 
@@ -189,7 +195,17 @@ def cmd_auto(cfg: Config, args: argparse.Namespace) -> int:
         cfg.watch.rolling_minutes = args.rolling
     print("配信が始まると自動で録画し、終わったらショート動画"
           + ("と Twitch クリップ" if cfg.clips.enabled else "") + "を作ります。止めるときは Ctrl+C。")
-    watch(cfg, channel, dry_run=args.dry_run)
+    # 同じ作業フォルダーで auto が二重に動かないようにする (タスクトレイのアイコンと手動の起動など)
+    lock = file_lock(Path(cfg.work_dir) / "auto", timeout=1.0)
+    try:
+        lock.__enter__()
+    except TimeoutError:
+        print("auto はすでに別の窓 (またはタスクトレイのアイコン) で動いています", file=sys.stderr)
+        return 3
+    try:
+        watch(cfg, channel, dry_run=args.dry_run)
+    finally:
+        lock.__exit__(None, None, None)
     return 0
 
 
@@ -350,6 +366,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-twitch-clips", action="store_true", help="Twitch の公式クリップは作らない")
     add_render_opts(sp, twitch_clips=False)  # auto はログイン状態から自動で決める
     sp.set_defaults(func=cmd_auto)
+
+    sp = sub.add_parser("tray", help="タスクトレイにアイコンを常駐させ、自動処理 (auto) をメニューで切り替える")
+    sp.add_argument("channel", nargs="?", default="yuuki_ftw")
+    sp.set_defaults(func=cmd_tray)
 
     sp = sub.add_parser("login", help="配信者アカウントで Twitch にログイン (公式クリップの自動作成用)")
     sp.set_defaults(func=cmd_login)
