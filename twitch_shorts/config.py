@@ -137,6 +137,14 @@ class TranscribeConfig:
 LLM_PROVIDERS = ("claude", "gemini")
 
 
+def normalize_provider(value) -> str:
+    """[llm] provider をそろえる ("Gemini " → "gemini")。使えない値なら ValueError。"""
+    provider = str(value or "claude").strip().lower()
+    if provider not in LLM_PROVIDERS:
+        raise ValueError(f"[llm] provider は {' / '.join(LLM_PROVIDERS)} のどれかにしてください: {value}")
+    return provider
+
+
 @dataclass
 class LLMConfig:
     enabled: bool = False
@@ -236,8 +244,10 @@ def load_config(path: str | os.PathLike | list | None = None) -> Config:
     cfg.twitch.client_secret = os.environ.get("TWITCH_CLIENT_SECRET", cfg.twitch.client_secret)
     cfg.twitch.irc_oauth_token = os.environ.get("TWITCH_IRC_TOKEN", cfg.twitch.irc_oauth_token)
     cfg.detect.keywords = {k.lower(): v for k, v in cfg.detect.keywords.items()}
-    # 書き間違いに気付かないまま AI 無しで動き続けないよう、読み込んだ時点で止める
-    cfg.llm.provider = (cfg.llm.provider or "claude").strip().lower()
-    if cfg.llm.provider not in LLM_PROVIDERS:
-        raise ValueError(f"[llm] provider は {' / '.join(LLM_PROVIDERS)} のどれかにしてください: {cfg.llm.provider}")
+    # AI を使う設定なのに provider を書き間違えていたら、気付かないまま AI 無しで動き続けないよう読み込んだ時点で止める
+    try:
+        cfg.llm.provider = normalize_provider(cfg.llm.provider)
+    except ValueError:
+        if cfg.llm.enabled:
+            raise
     return cfg

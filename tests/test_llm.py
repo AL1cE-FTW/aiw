@@ -137,5 +137,10 @@ def test_misspelled_provider_stops_at_config_load(tmp_path):
     p.write_text('[llm]\nenabled = true\nprovider = "Gemni"\n', encoding="utf-8")
     with pytest.raises(ValueError):
         load_config(str(p))
+    p.write_text('[llm]\nenabled = true\nprovider = 1\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(str(p))
+    p.write_text('[llm]\nenabled = false\nprovider = "Gemni"\n', encoding="utf-8")
+    load_config(str(p))  # AI を使わない設定なら止めない
     p.write_text('[llm]\nprovider = " Gemini "\n', encoding="utf-8")
     assert load_config(str(p)).llm.provider == "gemini"

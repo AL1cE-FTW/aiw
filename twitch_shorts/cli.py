@@ -412,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(config_path)
     except ValueError as e:  # 設定の書き間違い
-        print(f"config.toml の設定に誤りがあります: {e}", file=sys.stderr)
+        print(f"設定ファイル ({', '.join(map(str, config_path or []))}) に誤りがあります: {e}", file=sys.stderr)
         return 2
     _common_overrides(cfg, args)
     try:

@@ -10,12 +10,11 @@ from __future__ import annotations
 import json
 import logging
 
-from .config import LLM_PROVIDERS, LLMConfig
+from .config import LLM_PROVIDERS, LLMConfig, normalize_provider
 from .models import Highlight, normalize_hashtag
 
 log = logging.getLogger(__name__)
 
-PROVIDERS = LLM_PROVIDERS
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "gemini": "gemini-flash-latest"}
 
 # 場面の種類 (参考: KumoMoments の funny / clutch / wholesome / lore)
@@ -84,17 +83,14 @@ def _candidate_payload(h: Highlight, idx: int) -> dict:
 
 
 def provider_of(cfg: LLMConfig) -> str:
-    provider = (cfg.provider or "claude").strip().lower()
-    if provider not in PROVIDERS:
-        raise ValueError(f"[llm] provider は {' / '.join(PROVIDERS)} のどれかにしてください: {cfg.provider}")
-    return provider
+    return normalize_provider(cfg.provider)
 
 
 def model_of(cfg: LLMConfig) -> str:
     """使うモデル。別の AI 用のモデル名が書かれていたら (provider だけ変えた場合など)、その AI の既定のモデルにする。"""
     provider = provider_of(cfg)
     model = (cfg.model or "").strip()
-    other = [p for p in PROVIDERS if p != provider]
+    other = [p for p in LLM_PROVIDERS if p != provider]
     if not model or any(model.startswith(p) for p in other):
         return DEFAULT_MODELS[provider]
     return model
@@ -172,8 +168,7 @@ def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None) ->
             "system_instruction": system,
             "response_mime_type": "application/json",
             "response_json_schema": RESULT_SCHEMA,
-            # Gemini の Flash は考える分のトークンもこの上限に含まれるので、余裕を持たせる
-            "max_output_tokens": 32768,
+            # 出力の上限はモデルごとに違うので指定しない (モデルの上限まで使う)
         },
     )
     candidate = (getattr(response, "candidates", None) or [None])[0]

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .config import Config
+from .config import Config, normalize_provider
 from .twitch_auth import can_create_clips, load_token
 
 
@@ -89,13 +89,18 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
     whisper = _has_module("faster_whisper")
     checks.append(Check("字幕 (faster-whisper)", whisper,
                         "使える" if whisper else "任意: pip install 'twitch-shorts[transcribe]'", required=False))
-    if (cfg.llm.provider or "").strip().lower() == "gemini":
+    try:
+        provider = normalize_provider(cfg.llm.provider)
+    except ValueError as e:
+        provider = ""
+        checks.append(Check("AI タイトル・引きの言葉", False, str(e), required=False))
+    if provider == "gemini":
         llm = _has_module("google.genai") and bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         checks.append(Check("AI タイトル・引きの言葉 (Gemini)", llm,
                             "使える" if llm else "任意: pip install 'twitch-shorts[gemini]' と GEMINI_API_KEY"
                             " (または GOOGLE_API_KEY。両方あるときは GOOGLE_API_KEY が使われる)",
                             required=False))
-    else:
+    elif provider == "claude":
         llm = _has_module("anthropic") and bool(os.environ.get("ANTHROPIC_API_KEY"))
         checks.append(Check("AI タイトル・引きの言葉 (Claude)", llm,
                             "使える" if llm else "任意: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY"
