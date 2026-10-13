@@ -11,7 +11,6 @@ pip install 'twitch-shorts[tray]' (pystray と Pillow) が必要。
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
@@ -67,7 +66,20 @@ class AutoController:
         write_json_atomic(self.state_path, {"auto": enabled})
 
     def running(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        proc = self.proc  # 別のスレッドが None にしても大丈夫なように、一度だけ読む
+        return proc is not None and proc.poll() is None
+
+    def auto_running_elsewhere(self) -> bool:
+        """このアイコン以外で auto が動いているか (前のアイコンが強制終了されて残った auto、手動で起動した auto)。"""
+        probe = file_lock(self.work_dir / "auto", timeout=0.2)
+        try:
+            probe.__enter__()
+        except TimeoutError:
+            return True
+        except OSError:
+            return False
+        probe.__exit__(None, None, None)
+        return False
 
     def status(self) -> str:
         if self.running():
@@ -98,41 +110,68 @@ class AutoController:
             if self.running():
                 return False
             self.work_dir.mkdir(parents=True, exist_ok=True)
+            if self.auto_running_elsewhere():
+                self.error = "別の auto がすでに動いています。止めるには自動処理を OFF にしてください"
+                return False
             self.stop_file.unlink(missing_ok=True)
             logs = self.work_dir / "logs"
             logs.mkdir(parents=True, exist_ok=True)
             self.log_path = logs / f"auto_{datetime.now():%Y%m%d_%H%M%S}.log"
             self._close_log()
-            self._log_file = open(self.log_path, "ab")
             env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", STOP_FILE_ENV: str(self.stop_file)}
             kwargs = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
-            self.proc = self.popen(self.command(), cwd=self.cwd, env=env, stdout=self._log_file,
-                                   stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kwargs)
+            try:
+                self._log_file = open(self.log_path, "ab")
+                self.proc = self.popen(self.command(), cwd=self.cwd, env=env, stdout=self._log_file,
+                                       stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kwargs)
+            except OSError as e:
+                self._close_log()
+                self.error = f"起動できませんでした: {e}"
+                return False
             self.stopping = False
             self.error = ""
             log.info("auto を起動しました (ログ: %s)", self.log_path)
             return True
 
     def stop(self) -> None:
-        """止める指示を出す (いまの処理が終わってから止まる)。"""
+        """止める指示を出す (いまの処理が終わってから止まる)。
+
+        このアイコン以外で動いている auto (前のアイコンが強制終了されて残ったものなど) も、同じ停止のファイルで止まる。
+        """
         with self._lock:
-            if self.running():
+            mine = self.running()
+            if mine or self.auto_running_elsewhere():
                 self.stop_file.parent.mkdir(parents=True, exist_ok=True)
                 self.stop_file.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
-                self.stopping = True
+                self.stopping = mine
+            if not mine:
+                self.error = ""
 
     def kill(self) -> None:
-        """すぐに止める (処理中の動画は作りかけのまま残る)。"""
+        """すぐに止める。録画ツールや ffmpeg など、auto が起動したものもまとめて止める。"""
         with self._lock:
-            if self.running():
-                self.proc.kill()
+            proc = self.proc
+            if proc is None or proc.poll() is not None:
+                return
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                               creationflags=CREATE_NO_WINDOW)
+            proc.kill()
 
     def set_auto(self, enabled: bool) -> None:
+        """自動処理の ON / OFF。止めている途中に ON に戻した場合は、止まったあとで起動し直す (keep_alive)。"""
         self.save_auto_enabled(enabled)
         if enabled:
+            self.error = ""
             self.start()
         else:
             self.stop()
+
+    def keep_alive(self) -> bool:
+        """ON なのに動いていなければ起動する (止めている途中に ON に戻した場合など)。エラーで止まったときは起動しない。"""
+        if self.auto_enabled() and not self.error and not self.running():
+            return self.start()
+        return False
 
     def check(self) -> bool:
         """子プロセスの終了に気付いたら後片付けをする。状態が変わったら True。"""
@@ -202,6 +241,29 @@ def set_startup(enabled: bool, channel: str, config_paths: list[str] | None = No
 # アイコン
 # ---------------------------------------------------------------------------
 
+def _setup_logging(path: Path) -> None:
+    """pythonw で起動したときは画面に何も出ないので、ログをファイルに残す。"""
+    if sys.stderr is not None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(filename=str(path), level=logging.INFO, encoding="utf-8",
+                            format="%(asctime)s %(levelname)s %(message)s")
+    except OSError:
+        pass
+
+
+def _alert(message: str) -> None:
+    """エラーを伝える。pythonw で起動していて画面に出せないときは、Windows のメッセージボックスで出す。"""
+    log.error(message)
+    if sys.stderr is not None:
+        print(message, file=sys.stderr)
+    elif os.name == "nt":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, "twitch-shorts", 0x30)
+
+
 def make_image(status: str):
     from PIL import Image, ImageDraw
 
@@ -230,13 +292,20 @@ def latest_review_page(output_dir: str | Path) -> Path | None:
 
 
 def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[str] | None = None) -> int:
+    work_dir = str(Path(work_dir).resolve())
+    output_dir = str(Path(output_dir).resolve())
+    _setup_logging(Path(work_dir) / "logs" / "tray.log")
     try:
         import pystray
-    except ImportError:
-        print("タスクトレイのアイコンには pystray と Pillow が必要です: pip install -e \".[tray]\"", file=sys.stderr)
+        from PIL import Image  # noqa: F401
+    except ImportError as e:
+        if getattr(e, "name", "") in ("pystray", "PIL"):
+            _alert("タスクトレイのアイコンには pystray と Pillow が必要です: pip install -e \".[tray]\"")
+        else:
+            _alert(f"タスクトレイを使えません: {e}")
         return 1
     except Exception as e:  # 画面の無い環境など
-        print(f"タスクトレイを使えません: {e}", file=sys.stderr)
+        _alert(f"タスクトレイを使えません: {e}")
         return 1
 
     # 2 つ目のアイコンは起動しない (auto が二重に動かないように)
@@ -244,7 +313,10 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
     try:
         single.__enter__()
     except TimeoutError:
-        print("タスクトレイのアイコンはもう起動しています", file=sys.stderr)
+        _alert("タスクトレイのアイコンはもう起動しています (画面右下の ^ の中を確認してください)")
+        return 1
+    except OSError as e:
+        _alert(f"タスクトレイのアイコンを起動できません: {e}")
         return 1
 
     ctl = AutoController(channel, work_dir, config_paths)
@@ -262,16 +334,32 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         icon.title = f"twitch-shorts ({channel}): {ctl.status_text()}"[:127]
         icon.update_menu()
 
-    def toggle_auto(icon, item) -> None:
-        ctl.set_auto(not ctl.auto_enabled())
-        refresh(icon)
+    def in_background(fn):
+        # メニューの操作は裏で行う (PowerShell の起動などでアイコンが固まらないように)
+        def action(icon, item) -> None:
+            def run() -> None:
+                try:
+                    fn(icon)
+                except Exception as e:
+                    log.exception("メニューの操作に失敗しました")
+                    notify(icon, f"失敗しました: {e}")
+                refresh(icon)
+            threading.Thread(target=run, daemon=True).start()
+        return action
 
-    def toggle_startup(icon, item) -> None:
-        try:
-            set_startup(not startup_enabled(), channel, config_paths)
-        except Exception as e:
-            notify(icon, f"PC の起動時の設定を変えられませんでした: {e}")
-        refresh(icon)
+    def auto_checked(item) -> bool:
+        # 保存した設定ではなく実際の状態を表示する (エラーで止まったときは外れて見える)
+        return ctl.status() == "running"
+
+    @in_background
+    def toggle_auto(icon) -> None:
+        ctl.set_auto(ctl.status() != "running")
+        if ctl.error:
+            notify(icon, ctl.error)
+
+    @in_background
+    def toggle_startup(icon) -> None:
+        set_startup(not startup_enabled(), channel, config_paths)
 
     def open_output(icon, item) -> None:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -292,20 +380,21 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
 
     def quit_app(icon, item) -> None:
         quitting.set()  # 自動処理の ON / OFF はそのまま (次に起動したときも同じ状態で始まる)
-        ctl.stop()  # 処理の途中なら、終わってからアイコンを閉じる (監視のスレッドが閉じる)
+        if ctl.running():
+            ctl.stop()  # 処理の途中なら、終わってからアイコンを閉じる (監視のスレッドが閉じる)
         refresh(icon)
         if not ctl.running():
             icon.stop()
 
-    def kill_now(icon, item) -> None:
+    @in_background
+    def kill_now(icon) -> None:
         ctl.kill()
-        refresh(icon)
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda item: ctl.status_text(), None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("自動処理 (配信ごとにショートを作る)", toggle_auto,
-                         checked=lambda item: ctl.auto_enabled(), enabled=lambda item: not quitting.is_set()),
+                         checked=auto_checked, enabled=lambda item: not quitting.is_set()),
         pystray.MenuItem("PC の起動時にこのアイコンを起動", toggle_startup,
                          checked=lambda item: startup_enabled(), visible=os.name == "nt"),
         pystray.Menu.SEPARATOR,
@@ -320,19 +409,24 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
 
     def watch_child(icon) -> None:
         icon.visible = True
-        if ctl.auto_enabled():
-            ctl.start()
-        refresh(icon)
+        first = True
         while True:
-            time.sleep(2)
-            changed = ctl.check()
-            if changed:
-                if ctl.error and not quitting.is_set():
+            try:
+                if not first:
+                    time.sleep(2)
+                changed = ctl.check()
+                if changed and ctl.error and not quitting.is_set():
                     notify(icon, f"自動処理が止まりました ({ctl.error})。ログを確認してください")
-                refresh(icon)
-            if quitting.is_set() and not ctl.running():
-                icon.stop()
-                return
+                if not quitting.is_set() and ctl.keep_alive():
+                    changed = True
+                if changed or first:
+                    refresh(icon)
+                first = False
+                if quitting.is_set() and not ctl.running():
+                    icon.stop()
+                    return
+            except Exception:  # 1 回の失敗で監視をやめない
+                log.exception("auto の様子を確認できませんでした")
 
     try:
         icon.run(setup=watch_child)

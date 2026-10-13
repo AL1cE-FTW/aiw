@@ -137,12 +137,22 @@ def test_latest_review_page(tmp_path):
 
 
 def test_run_tray_menu_with_fake_pystray(tmp_path, monkeypatch):
-    """pystray の代わりに模擬を使い、メニューの項目と終了までの流れを確かめる。"""
+    """pystray の代わりに模擬を使い、メニューで OFF → 終了するまでの流れを確かめる。"""
     import sys
     import types
+    from types import SimpleNamespace
 
     pytest.importorskip("PIL")
+    real_sleep = time.sleep
     fake = types.ModuleType("pystray")
+    procs = []
+
+    def wait_for(cond):
+        for _ in range(500):
+            if cond():
+                return
+            real_sleep(0.01)
+        raise AssertionError("待ちきれませんでした")
 
     class MenuItem:
         def __init__(self, text, action, checked=None, radio=False, default=False, visible=True, enabled=True):
@@ -156,30 +166,33 @@ def test_run_tray_menu_with_fake_pystray(tmp_path, monkeypatch):
 
     class Icon:
         def __init__(self, name, image, title, menu):
-            self.menu, self.title, self.visible, self.notes = menu, title, False, []
+            self.menu, self.title, self.visible, self.stopped = menu, title, False, False
             fake.last = self
 
         def update_menu(self):
             pass
 
         def notify(self, message, title=None):
-            self.notes.append(message)
+            pass
 
         def stop(self):
             self.stopped = True
 
         def run(self, setup):
+            t = threading.Thread(target=setup, args=(self,), daemon=True)
+            t.start()
             item = {i.text: i for i in self.menu.items if isinstance(i.text, str)}
-            texts = [i.text(i) if callable(i.text) else i.text for i in self.menu.items]
-            assert any("停止中" in t or "動作中" in t for t in texts)
-            item["自動処理 (配信ごとにショートを作る)"].action(self, None)  # OFF にする
+            auto = item["自動処理 (配信ごとにショートを作る)"]
+            wait_for(lambda: procs and auto.checked(auto))  # 起動時に ON なので auto が動いている
+            auto.action(self, None)  # OFF にする → 止めている途中
+            wait_for(lambda: (tmp_path / "work" / "tray.stop").exists())
+            procs[0].returncode = 130  # auto がいまの処理を終えて止まった
             item["終了"].action(self, None)
-            setup(self)
+            t.join(timeout=5)
 
     fake.Menu, fake.MenuItem, fake.Icon = Menu, MenuItem, Icon
     monkeypatch.setitem(sys.modules, "pystray", fake)
-    monkeypatch.setattr(tray.time, "sleep", lambda s: None)
-    procs = []
+    monkeypatch.setattr(tray, "time", SimpleNamespace(sleep=lambda s: real_sleep(0.01), time=time.time))
 
     class Ctl(tray.AutoController):
         def __init__(self, *a, **k):
@@ -192,8 +205,49 @@ def test_run_tray_menu_with_fake_pystray(tmp_path, monkeypatch):
     monkeypatch.setattr(tray, "AutoController", Ctl)
     work = tmp_path / "work"
     work.mkdir()
-    (work / "tray.json").write_text('{"auto": true}')
-    # 終了の前に OFF にしたので、起動時にも auto は動かさずに閉じる
     assert tray.run_tray("yuuki_ftw", str(work), str(tmp_path / "out")) == 0
-    assert fake.last.stopped and procs == []
+    assert fake.last.stopped and len(procs) == 1  # OFF にしたので起動し直さない
     assert '"auto": false' in (work / "tray.json").read_text()
+
+
+def test_turning_on_while_stopping_restarts_after_exit(tmp_path):
+    procs = []
+    ctl = make_ctl(tmp_path, procs)
+    ctl.set_auto(True)
+    ctl.set_auto(False)
+    ctl.set_auto(True)  # 止まりきる前に ON に戻した
+    procs[0][2].returncode = 130
+    ctl.check()
+    assert ctl.keep_alive() is True and len(procs) == 2 and ctl.status() == "running"
+
+
+def test_error_stop_is_not_restarted_automatically(tmp_path):
+    procs = []
+    ctl = make_ctl(tmp_path, procs)
+    ctl.set_auto(True)
+    procs[0][2].returncode = 1
+    ctl.check()
+    assert ctl.keep_alive() is False and ctl.status() == "error"
+
+
+def test_does_not_start_when_another_auto_holds_the_lock(tmp_path):
+    from twitch_shorts.fileutil import file_lock
+
+    ctl = make_ctl(tmp_path, [])
+    (tmp_path / "work").mkdir()
+    import subprocess
+    import sys as _sys
+    holder = subprocess.Popen([_sys.executable, "-c", (
+        "import sys, time; sys.path.insert(0, %r);"
+        "from twitch_shorts.fileutil import file_lock\n"
+        "with file_lock(%r):\n    print('locked', flush=True); time.sleep(30)") % (
+        str(Path(__file__).resolve().parents[1]), str(tmp_path / "work" / "auto"))], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        assert ctl.start() is False and "別の auto" in ctl.error
+        ctl.stop()  # 別の auto にも停止のファイルで止まるよう伝える
+        assert ctl.stop_file.exists()
+    finally:
+        holder.kill()
+    with file_lock(tmp_path / "work" / "auto", timeout=5):
+        pass

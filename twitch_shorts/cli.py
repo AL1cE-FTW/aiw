@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from .config import Config, load_config, normalize_provider
-from .fileutil import add_processed_vod, processed_vods
+from .fileutil import add_processed_vod, file_lock, processed_vods
 
 log = logging.getLogger("twitch_shorts")
 
@@ -195,7 +195,17 @@ def cmd_auto(cfg: Config, args: argparse.Namespace) -> int:
         cfg.watch.rolling_minutes = args.rolling
     print("配信が始まると自動で録画し、終わったらショート動画"
           + ("と Twitch クリップ" if cfg.clips.enabled else "") + "を作ります。止めるときは Ctrl+C。")
-    watch(cfg, channel, dry_run=args.dry_run)
+    # 同じ作業フォルダーで auto が二重に動かないようにする (タスクトレイのアイコンと手動の起動など)
+    lock = file_lock(Path(cfg.work_dir) / "auto", timeout=1.0)
+    try:
+        lock.__enter__()
+    except TimeoutError:
+        print("auto はすでに別の窓 (またはタスクトレイのアイコン) で動いています", file=sys.stderr)
+        return 3
+    try:
+        watch(cfg, channel, dry_run=args.dry_run)
+    finally:
+        lock.__exit__(None, None, None)
     return 0
 
 
