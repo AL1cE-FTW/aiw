@@ -2098,3 +2098,30 @@ def test_no_record_session_length_comes_from_meta_or_chat(tmp_path):
     assert watcher._session_length(s) == 1234.5  # 途中で止まった場合はチャットの最後まで
     watcher._save_meta(s, start_time=1000.0, end_time=4600.0)
     assert watcher._session_length(s) == 3600.0
+
+
+def test_crashed_no_record_session_length_uses_last_write(tmp_path):
+    import os
+    import time as _time
+
+    s = tmp_path / "s"
+    s.mkdir()
+    watcher._save_parts(s, [(s / "stream.ts", 0.0)])
+    (s / "chat.jsonl").write_text("", encoding="utf-8")  # チャットは無かった
+    now = _time.time()
+    watcher._save_meta(s, start_time=now - 7200)
+    os.utime(s / "chat.jsonl", (now - 600, now - 600))  # 止まる 10 分前まで記録していた
+    assert 6500 < watcher._session_length(s) < 6700
+
+
+def test_no_record_leftover_is_retried_longer(tmp_path, monkeypatch):
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    s = tmp_path / "work" / "yuuki_ftw" / "s1"
+    s.mkdir(parents=True)
+    watcher._save_parts(s, [(s / "stream.ts", 0.0)])
+    watcher._save_meta(s, start_time=1000.0)
+    runs = []
+    monkeypatch.setattr(watcher, "_final_pass", lambda *a, **k: runs.append(1) or None)  # VOD がまだ無い
+    for _ in range(8):
+        watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
+    assert len(runs) == watcher.MAX_LEFTOVER_ATTEMPTS_NO_RECORDING

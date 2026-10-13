@@ -36,6 +36,8 @@ LIVE_TAIL_MARGIN = 45.0
 MAX_RECORDER_RESTARTS = 5
 RESTART_BACKOFF_SECONDS = 10.0
 MAX_LEFTOVER_ATTEMPTS = 2
+# 録画が無い記録 (録画しない設定) は VOD が公開されるまで作れないので、もう少し粘る
+MAX_LEFTOVER_ATTEMPTS_NO_RECORDING = 6
 
 
 class LiveChecker:
@@ -257,7 +259,8 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             tail = recorder_log_tail(proc)
             if proc.returncode not in (0, None, -15) and tail:
                 log.warning("録画プロセスの出力: %s", tail)
-            if not _still_live(helix, channel, checker):
+            # 録画しない設定では、_NoRecorder が「配信が終わった」と確かめたところなので聞き直さない
+            if (not record and proc.returncode == 0) or not _still_live(helix, channel, checker):
                 stream_ended = True
                 break
             # すぐに終わってしまう録画が続く場合 (配信終了直後で API の反映が遅れている場合も含む) は、
@@ -440,7 +443,7 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
                     vod = (vod_id, shift, vod_duration)
         except Exception as e:
             log.warning("この配信の VOD を確認できませんでした: %s", e)
-        if vod is None and _load_parts(session_dir):
+        if vod is None and (cfg.watch.record or _load_parts(session_dir)):
             log.warning("この配信の VOD が見つからないため、録画から作ります (Twitch クリップは作りません。"
                         "Twitch の設定で「過去の配信を保存」を有効にすると作れます)")
         elif vod is None:
@@ -598,12 +601,24 @@ def _session_length(session_dir: Path) -> float:
     if not parts:
         meta = _load_meta(session_dir)
         try:
-            if meta.get("end_time") and meta.get("start_time"):
-                return max(0.0, float(meta["end_time"]) - float(meta["start_time"]))
+            start = float(meta["start_time"])
+        except (KeyError, TypeError, ValueError):
+            start = None
+        try:
+            if meta.get("end_time") and start is not None:
+                return max(0.0, float(meta["end_time"]) - start)
         except (TypeError, ValueError):
             pass
+        # 途中で止まった (停電など) 場合: 記録が最後に書き込まれた時刻か、チャット・視聴者数の最後の時刻
         chat, viewers = _load_signals(session_dir)
-        return max([m.offset for m in chat] + [v.offset for v in viewers or []] + [0.0])
+        lengths = [m.offset for m in chat] + [v.offset for v in viewers or []] + [0.0]
+        if start is not None:
+            for name in ("chat.jsonl", "viewers.jsonl"):
+                try:
+                    lengths.append((session_dir / name).stat().st_mtime - start)
+                except OSError:
+                    pass
+        return max(lengths)
     video, offset = parts[-1]
     try:
         return offset + probe_duration(str(video))
@@ -620,7 +635,7 @@ def find_stream_vod_info(helix, channel: str, record_start: float, stream_starte
     (直前に終わった前回の配信の VOD は録画開始の時点で終わっているので選ばれない)。
     """
     user_id = user_id or helix.get_user_id(channel)
-    archives = helix.get_recent_archives(user_id, 3)
+    archives = helix.get_recent_archives(user_id, 10)
     if stream_started is not None:
         # 開始時刻がいちばん近いもの (配信が落ちてすぐ立て直した場合、開始時刻の近い VOD が 2 本ある)
         near = [v for v in archives if abs(v.created_at.timestamp() - stream_started) <= 600]
@@ -668,7 +683,7 @@ def process_leftovers(cfg: Config, channel: str, dry_run: bool = False, checker:
             attempts = int(attempts_file.read_text(encoding="utf-8").strip() or 0)
         except (OSError, ValueError):
             attempts = 0
-        if attempts >= MAX_LEFTOVER_ATTEMPTS:
+        if attempts >= (MAX_LEFTOVER_ATTEMPTS if _load_parts(session_dir) else MAX_LEFTOVER_ATTEMPTS_NO_RECORDING):
             log.info("処理に %d 回失敗した録画は飛ばします: %s", attempts, session_dir)
             continue
         if checker is not None and checker.is_live(channel, default=True):  # 確認できなければ配信中とみなす
