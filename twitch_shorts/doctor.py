@@ -21,7 +21,10 @@ class Check:
 
 
 def _has_module(name: str) -> bool:
-    return importlib.util.find_spec(name) is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:  # "google.genai" の "google" 自体が無い場合
+        return False
 
 
 def _japanese_font() -> tuple[bool | None, str]:
@@ -86,10 +89,17 @@ def run_checks(cfg: Config, channel: str = "", online: bool = False) -> list[Che
     whisper = _has_module("faster_whisper")
     checks.append(Check("字幕 (faster-whisper)", whisper,
                         "使える" if whisper else "任意: pip install 'twitch-shorts[transcribe]'", required=False))
-    llm = _has_module("anthropic") and bool(os.environ.get("ANTHROPIC_API_KEY"))
-    checks.append(Check("AI タイトル・引きの言葉 (Claude)", llm,
-                        "使える" if llm else "任意: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY",
-                        required=False))
+    if (cfg.llm.provider or "").strip().lower() == "gemini":
+        llm = _has_module("google.genai") and bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+        checks.append(Check("AI タイトル・引きの言葉 (Gemini)", llm,
+                            "使える" if llm else "任意: pip install 'twitch-shorts[gemini]' と GEMINI_API_KEY",
+                            required=False))
+    else:
+        llm = _has_module("anthropic") and bool(os.environ.get("ANTHROPIC_API_KEY"))
+        checks.append(Check("AI タイトル・引きの言葉 (Claude)", llm,
+                            "使える" if llm else "任意: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY"
+                            " (無料で使うなら [llm] provider = \"gemini\")",
+                            required=False))
     return checks
 
 

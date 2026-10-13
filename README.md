@@ -21,7 +21,7 @@ twitch-shorts auto yuuki_ftw     # 起動しておくだけで、配信ごとに
                  ▼  各シグナルを「平常時からのずれ」に正規化して合成 → ピーク検出
           ハイライト候補
                  │  (任意) faster-whisper で文字起こし → 文の切れ目に区間を合わせる
-                 │  (任意) Claude で評価・タイトル・引きの言葉・カテゴリ・ハッシュタグ
+                 │  (任意) Claude / Gemini で評価・タイトル・引きの言葉・カテゴリ・ハッシュタグ
                  ▼
           ffmpeg で 9:16 に変換 + 冒頭の先見せ + テロップ焼き込み + 音量正規化 (-14 LUFS)
                  ▼
@@ -60,6 +60,7 @@ brew install ffmpeg && brew install --cask font-noto-sans-cjk-jp
 pip install -e .                 # 基本機能
 pip install -e '.[transcribe]'   # 字幕を付ける場合 (faster-whisper)
 pip install -e '.[llm]'          # Claude で評価・タイトル生成する場合
+pip install -e '.[gemini]'       # Gemini (無料枠あり) で評価・タイトル生成する場合
 cp config.example.toml config.toml
 ```
 
@@ -76,11 +77,15 @@ export TWITCH_CLIENT_SECRET=yyyy
 無くても `vod` / `watch` / `local` は動きますが、次が使えなくなります:
 既存クリップのシグナル、`latest` コマンド、API による配信開始検知 (代わりに yt-dlp で確認します)。
 
-### Claude (任意)
+### AI 評価 (任意: Claude / Gemini)
 
-`--llm` を付けると、検出した候補 (チャット抜粋・文字起こし) を Claude に渡して
-「単体で見て面白いか」を 0〜10 で評価し直し、タイトルを付けます。`ANTHROPIC_API_KEY` が必要です。
-失敗・拒否された場合はシグナルだけの順位で続行します。
+`--llm` を付けると、検出した候補 (チャット抜粋・文字起こし) を AI に渡して
+「単体で見て面白いか」を 0〜10 で評価し直し、タイトルを付けます。`config.toml` の `[llm] provider` で選びます。
+
+- `claude`: `pip install -e '.[llm]'` と `ANTHROPIC_API_KEY` (有料)
+- `gemini`: `pip install -e '.[gemini]'` と `GEMINI_API_KEY` (Google AI Studio で作成。無料枠あり)
+
+失敗・拒否・上限に達した場合はシグナルだけの順位で続行します。
 
 ## 使い方の例 (yuuki_ftw)
 
@@ -247,6 +252,7 @@ Twitch への通信部分はモックでテストしています。
 - VOD チャットを GQL で `contentOffsetSeconds` によりページングする方式: twitch-vod-lib
   <https://pypi.org/project/twitch-vod-lib/>
 - Claude API (構造化出力 `output_config.format`、`fallbacks`): Anthropic 公式 SDK ドキュメント
+- Gemini API (`google-genai` の `generate_content`、`response_json_schema`): Google Gen AI Python SDK
   <https://platform.claude.com/docs>
 - yt-dlp (`download_ranges` による区間ダウンロード): <https://github.com/yt-dlp/yt-dlp>
 - faster-whisper: <https://github.com/SYSTRAN/faster-whisper>

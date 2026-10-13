@@ -1,7 +1,8 @@
-"""Claude でハイライト候補を再評価し、ショート動画のタイトルを付ける (任意機能)。
+"""AI (Claude または Gemini) でハイライト候補を再評価し、ショート動画のタイトルを付ける (任意機能)。
 
-pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY の設定が必要。
-LLM が使えない・拒否した場合は、シグナルだけで決めた順位をそのまま使う。
+- Claude: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY
+- Gemini: pip install 'twitch-shorts[gemini]' と GEMINI_API_KEY (Google AI Studio で作成。無料枠あり)
+AI が使えない・拒否した・上限に達した場合は、シグナルだけで決めた順位をそのまま使う。
 """
 
 from __future__ import annotations
@@ -13,6 +14,9 @@ from .config import LLMConfig
 from .models import Highlight, normalize_hashtag
 
 log = logging.getLogger(__name__)
+
+PROVIDERS = ("claude", "gemini")
+DEFAULT_MODELS = {"claude": "claude-opus-5-5", "gemini": "gemini-flash-latest"}
 
 # 場面の種類 (参考: KumoMoments の funny / clutch / wholesome / lore)
 CATEGORIES = ["面白い", "スーパープレイ", "ほっこり", "ネタ・名場面", "その他"]
@@ -79,7 +83,24 @@ def _candidate_payload(h: Highlight, idx: int) -> dict:
     }
 
 
-def rerank_with_claude(
+def provider_of(cfg: LLMConfig) -> str:
+    provider = (cfg.provider or "claude").strip().lower()
+    if provider not in PROVIDERS:
+        raise ValueError(f"[llm] provider は {' / '.join(PROVIDERS)} のどれかにしてください: {cfg.provider}")
+    return provider
+
+
+def model_of(cfg: LLMConfig) -> str:
+    """使うモデル。別の AI 用のモデル名が書かれていたら (provider だけ変えた場合など)、その AI の既定のモデルにする。"""
+    provider = provider_of(cfg)
+    model = (cfg.model or "").strip()
+    other = [p for p in PROVIDERS if p != provider]
+    if not model or any(model.startswith(p) for p in other):
+        return DEFAULT_MODELS[provider]
+    return model
+
+
+def rerank_with_llm(
     highlights: list[Highlight],
     cfg: LLMConfig,
     channel: str,
@@ -88,16 +109,9 @@ def rerank_with_claude(
     max_duration: float,
     client=None,
 ) -> list[Highlight]:
-    """候補に LLM のスコアとタイトルを付けて、良い順に並べ替えて返す。"""
+    """候補に AI のスコアとタイトルを付けて、良い順に並べ替えて返す。"""
     if not highlights:
         return highlights
-    if client is None:
-        try:
-            import anthropic
-        except ImportError as e:  # pragma: no cover - 任意依存
-            raise RuntimeError("LLM 機能には anthropic が必要です: pip install 'twitch-shorts[llm]'") from e
-        client = anthropic.Anthropic()
-
     user_content = json.dumps(
         {
             "channel": channel,
@@ -106,23 +120,76 @@ def rerank_with_claude(
         },
         ensure_ascii=False,
     )
+    system = SYSTEM_PROMPT.format(language=cfg.language, min_dur=min_duration, max_dur=max_duration)
+    call = _call_gemini if provider_of(cfg) == "gemini" else _call_claude
+    text = call(cfg, system, user_content, client)
+    if text is None:
+        return highlights
+    return _apply_results(highlights, text, min_duration, max_duration)
+
+
+# 以前の名前 (互換のため残す)
+rerank_with_claude = rerank_with_llm
+
+
+def _call_claude(cfg: LLMConfig, system: str, user_content: str, client=None) -> str | None:
+    if client is None:
+        try:
+            import anthropic
+        except ImportError as e:  # pragma: no cover - 任意依存
+            raise RuntimeError("Claude を使うには anthropic が必要です: pip install 'twitch-shorts[llm]'") from e
+        client = anthropic.Anthropic()
     response = client.beta.messages.create(
-        model=cfg.model,
+        model=model_of(cfg),
         max_tokens=16000,
         # ポリシー判定で拒否された場合にサーバー側で別モデルへ自動フォールバックさせる
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
-        system=SYSTEM_PROMPT.format(language=cfg.language, min_dur=min_duration, max_dur=max_duration),
+        system=system,
         messages=[{"role": "user", "content": user_content}],
         output_config={"effort": cfg.effort, "format": {"type": "json_schema", "schema": RESULT_SCHEMA}},
     )
     if response.stop_reason == "refusal":
-        log.warning("LLM が評価を拒否したため、シグナルのみの順位を使います")
-        return highlights
+        log.warning("AI が評価を拒否したため、シグナルのみの順位を使います")
+        return None
     if response.stop_reason == "max_tokens":
-        log.warning("LLM の出力が途中で切れたため、シグナルのみの順位を使います")
-        return highlights
-    text = next((b.text for b in response.content if b.type == "text"), "")
+        log.warning("AI の出力が途中で切れたため、シグナルのみの順位を使います")
+        return None
+    return next((b.text for b in response.content if b.type == "text"), "")
+
+
+def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None) -> str | None:
+    if client is None:
+        try:
+            from google import genai
+        except ImportError as e:  # pragma: no cover - 任意依存
+            raise RuntimeError("Gemini を使うには google-genai が必要です: pip install 'twitch-shorts[gemini]'") from e
+        client = genai.Client()  # GEMINI_API_KEY (または GOOGLE_API_KEY) を読む
+    response = client.models.generate_content(
+        model=model_of(cfg),
+        contents=user_content,
+        config={
+            "system_instruction": system,
+            "response_mime_type": "application/json",
+            "response_json_schema": RESULT_SCHEMA,
+            "max_output_tokens": 16000,
+        },
+    )
+    candidate = (getattr(response, "candidates", None) or [None])[0]
+    reason = getattr(getattr(candidate, "finish_reason", None), "name", None) or str(
+        getattr(candidate, "finish_reason", "") or "")
+    if reason.endswith("MAX_TOKENS"):
+        log.warning("AI の出力が途中で切れたため、シグナルのみの順位を使います")
+        return None
+    text = getattr(response, "text", None)
+    if not text:
+        log.warning("AI が結果を返さなかったため (%s)、シグナルのみの順位を使います", reason or "理由不明")
+        return None
+    return text
+
+
+def _apply_results(highlights: list[Highlight], text: str, min_duration: float,
+                   max_duration: float) -> list[Highlight]:
     try:
         results = json.loads(text)["candidates"]
     except (json.JSONDecodeError, KeyError, TypeError):

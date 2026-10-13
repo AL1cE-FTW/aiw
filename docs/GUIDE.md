@@ -205,7 +205,7 @@ output/
 - 「タイトル+タグをコピー」ボタン (投稿時にそのまま貼り付けられる)
 - 「Twitch クリップ」「VOD で開く」リンク
 
-> カテゴリ・説明文・AI のハッシュタグは `--llm` (6 章) を使ったときに付きます。
+> カテゴリ・説明文・AI のハッシュタグは AI (`--llm`、6 章) を使ったときに付きます。
 
 ### 投稿予定
 
@@ -257,18 +257,40 @@ twitch-shorts auto yuuki_ftw --transcribe
 
 ### AI でタイトル・引きの言葉・ハッシュタグを付ける
 
-```bash
+AI が各候補を「単体で見て面白いか」で採点し直し、タイトル・冒頭 3 秒の「引きの言葉」・カテゴリ・
+説明文・ハッシュタグを付けます。字幕 (文字起こし) と一緒に使うと、発言の内容も見て判断できます。
+AI は 2 種類から選べます。AI を呼ぶのは配信 1 回につき 1 回です。
+
+**Gemini (無料枠あり)**
+
+1. [Google AI Studio](https://aistudio.google.com/) で API キーを作る
+   (Google AI Pro に加入していれば、毎月の Google Cloud クレジットも使えます)
+2. インストールとキーの設定 (Windows):
+   ```powershell
+   pip install -e ".[gemini]"
+   setx GEMINI_API_KEY "ここにキー"   # 設定後は PowerShell を開き直す
+   ```
+3. `config.toml`:
+   ```toml
+   [llm]
+   enabled = true
+   provider = "gemini"
+   model = "gemini-flash-latest"
+   ```
+
+無料枠の上限は AI Studio のプロジェクトの画面で確認できます。上限に達したときは AI 無しの順位で続けます。
+無料枠で送った内容は Google のサービス改善に使われることがあります。
+
+**Claude (有料・高品質)**
+
+```powershell
 pip install -e ".[llm]"
+setx ANTHROPIC_API_KEY "ここにキー"   # Anthropic Console で作成
 ```
 
-[Anthropic Console](https://console.anthropic.com/) で API キーを作り、環境変数 `ANTHROPIC_API_KEY` に設定します。
+`config.toml` の `[llm]` で `enabled = true` と `provider = "claude"`。API の利用料金がかかります。
 
-```bash
-twitch-shorts auto yuuki_ftw --llm
-```
-
-Claude が各候補を「単体で見て面白いか」で採点し直し、タイトル・冒頭 3 秒の「引きの言葉」・カテゴリ・
-説明文・ハッシュタグを付けます (API の利用料金がかかります)。
+どちらも `config.toml` を変えずに試すなら、コマンドに `--llm` を付けます。
 
 ### レイアウト
 

@@ -316,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("-o", "--output", help="出力ディレクトリ")
         sp.add_argument("-n", "--top", type=int, help="作成するショート動画の本数")
         sp.add_argument("--layout", choices=["blur", "crop", "facecam"])
-        sp.add_argument("--llm", action="store_true", help="Claude で候補を評価しタイトルを付ける")
+        sp.add_argument("--llm", action="store_true", help="AI (Claude / Gemini) で候補を評価しタイトルを付ける")
         sp.add_argument("--transcribe", action="store_true", help="faster-whisper で字幕を付ける")
         sp.add_argument("--no-subtitles", action="store_true")
         sp.add_argument("--dry-run", action="store_true", help="検出だけ行い動画は作らない")

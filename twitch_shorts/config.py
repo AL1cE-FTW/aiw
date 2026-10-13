@@ -137,6 +137,9 @@ class TranscribeConfig:
 @dataclass
 class LLMConfig:
     enabled: bool = False
+    # claude (有料・高品質) / gemini (無料枠あり)
+    provider: str = "claude"
+    # provider に合わないモデル名 (例: gemini なのに claude-...) なら、その AI の既定のモデルを使う
     model: str = "claude-opus-5-5"
     effort: str = "medium"
     # LLMに渡す候補数 = top_n * candidate_factor

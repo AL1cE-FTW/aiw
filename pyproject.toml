@@ -17,8 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 transcribe = ["faster-whisper>=1.0"]
 llm = ["anthropic>=1.0"]
+gemini = ["google-genai>=2.0"]
 dev = ["pytest>=8"]
-all = ["faster-whisper>=1.0", "anthropic>=1.0"]
+all = ["faster-whisper>=1.0", "anthropic>=1.0", "google-genai>=2.0"]
 
 [project.scripts]
 twitch-shorts = "twitch_shorts.cli:main"
