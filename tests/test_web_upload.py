@@ -80,3 +80,18 @@ def test_pipeline_does_not_send_without_vod_or_in_dry_run(make_stream, tmp_path,
     pipeline.process(cfg, pipeline.LocalSource(str(video)), load_chat(chat_path), tmp_path / "o1")
     pipeline.process(cfg, pipeline.LocalSource(str(video)), load_chat(chat_path), tmp_path / "o2",
                      clip_vod=("999", 0.0), dry_run=True)
+
+
+def test_url_without_token_warns_and_skips(make_stream, tmp_path, monkeypatch, caplog):
+    from twitch_shorts import pipeline, web_upload
+    from twitch_shorts.chat import load_chat
+
+    video, chat_path = make_stream(duration=120, events=(50,))
+    cfg = Config(output_dir=str(tmp_path / "out"), work_dir=str(tmp_path / "work"))
+    cfg.render.width, cfg.render.height = 360, 640
+    cfg.web.url = "https://aiw.example.workers.dev"
+    monkeypatch.setattr(web_upload, "upload_run", lambda *a: (_ for _ in ()).throw(AssertionError("sent")))
+    with caplog.at_level("WARNING"):
+        pipeline.process(cfg, pipeline.LocalSource(str(video)), load_chat(chat_path), tmp_path / "o",
+                         clip_vod=("999", 0.0))
+    assert "upload_token" in caplog.text

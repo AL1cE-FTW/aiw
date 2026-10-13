@@ -13,9 +13,13 @@ function makeEnv() {
     TWITCH_CLIENT_ID: "cid", TWITCH_CLIENT_SECRET: "secret", UPLOAD_TOKEN: "up-token",
     SESSION_SECRET: "session-secret", ALLOWED_LOGIN: "yuuki_ftw",
     KV: {
-      get: async (k) => (kv.has(k) ? kv.get(k) : null),
-      put: async (k, v) => void kv.set(k, v),
+      get: async (k) => (kv.has(k) ? kv.get(k).value : null),
+      put: async (k, v, opts = {}) => void kv.set(k, { value: v, metadata: opts.metadata }),
       delete: async (k) => void kv.delete(k),
+      list: async ({ prefix }) => ({
+        keys: [...kv.entries()].filter(([k]) => k.startsWith(prefix)).map(([name, e]) => ({ name, metadata: e.metadata })),
+        list_complete: true,
+      }),
     },
   };
 }
@@ -70,8 +74,7 @@ test("upload requires the token and stores the run", async () => {
   assert.equal((await upload(env, { ...run, vod_id: "abc" })).status, 400);
   const res = await upload(env);
   assert.equal(res.status, 200);
-  assert.deepEqual(JSON.parse(kv.get("runs")), [run.id]);
-  assert.equal(JSON.parse(kv.get("run:" + run.id)).items.length, 2);
+  assert.equal(JSON.parse(kv.get("run:" + run.id).value).items.length, 2);
 });
 
 test("page shows login button until the allowed user logs in", async () => {
@@ -113,7 +116,7 @@ test("clip button creates a clip from the VOD and remembers it", async () => {
   await upload(env);
   const cookie = sessionFrom(await loginCookie(env));
   const post = (headers) => worker.fetch(req("/api/clip", { method: "POST",
-    headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ run: run.id, index: 0 }) }), env);
+    headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ run: run.id, start: 100 }) }), env);
 
   assert.equal((await post({ Origin: ORIGIN })).status, 401); // 未ログイン
   assert.equal((await post({ Cookie: cookie, Origin: "https://evil.example" })).status, 403); // 別サイトから
@@ -127,16 +130,51 @@ test("clip button creates a clip from the VOD and remembers it", async () => {
   assert.equal(q.get("vod_offset"), "130");
   assert.equal(q.get("duration"), "30");
   assert.equal(q.get("broadcaster_id"), "42");
-  assert.equal(JSON.parse(kv.get("run:" + run.id)).items[0].twitch_clip, "https://clips.twitch.tv/ClipABC");
+  assert.equal(JSON.parse(kv.get("run:" + run.id).value).items[0].twitch_clip, "https://clips.twitch.tv/ClipABC");
 
   // 2 回目は作らずに同じクリップを返す
   const before = calls.length;
   assert.equal((await (await post({ Cookie: cookie, Origin: ORIGIN })).json()).existing, true);
   assert.equal(calls.length, before);
 
-  // 送り直してもページで作ったクリップは消えない
-  await upload(env);
-  assert.equal(JSON.parse(kv.get("run:" + run.id)).items[0].twitch_clip, "https://clips.twitch.tv/ClipABC");
+  // 送り直して並び順が変わっても、ページで作ったクリップは同じ場面に残る
+  const reordered = { ...run, items: [{ start: 50, end: 70, score: 1, title: "新しい場面", clip_end: 70, clip_duration: 20 },
+    ...run.items] };
+  await upload(env, reordered);
+  const items = JSON.parse(kv.get("run:" + run.id).value).items;
+  assert.equal(items[0].twitch_clip, "");
+  assert.equal(items[1].twitch_clip, "https://clips.twitch.tv/ClipABC");
+});
+
+test("only Twitch clip URLs are accepted from uploads", async () => {
+  const env = makeEnv();
+  await upload(env, { ...run, items: [{ ...run.items[0], twitch_clip: "javascript:alert(1)" }] });
+  assert.equal(JSON.parse(kv.get("run:" + run.id).value).items[0].twitch_clip, "");
+  assert.equal((await upload(env, { ...run, items: [null] })).status, 400);
+});
+
+test("logout needs a same-site POST and ends every session", async () => {
+  const env = makeEnv();
+  const cookie = sessionFrom(await loginCookie(env));
+  const loggedIn = async () => !/Twitch でログイン/.test(await (await worker.fetch(req("/", { headers: { Cookie: cookie } }), env)).text());
+  assert.equal(await loggedIn(), true);
+  assert.equal((await worker.fetch(req("/logout"), env)).status, 404); // GET では何もしない
+  assert.equal((await worker.fetch(req("/logout", { method: "POST", headers: { Cookie: cookie, Origin: "https://evil.example" } }), env)).status, 403);
+  assert.equal(await loggedIn(), true);
+  const out = await worker.fetch(req("/logout", { method: "POST", headers: { Cookie: cookie, Origin: ORIGIN } }), env);
+  assert.equal(out.status, 303);
+  assert.equal(await loggedIn(), false); // 残っていた cookie も使えない
+});
+
+test("keeps only the newest runs", async () => {
+  const env = makeEnv();
+  for (let i = 0; i < 52; i++) {
+    await upload(env, { ...run, id: "r" + i });
+    await new Promise((ok) => setTimeout(ok, 2));
+  }
+  const names = [...kv.keys()].filter((k) => k.startsWith("run:"));
+  assert.equal(names.length, 50);
+  assert.ok(!names.includes("run:r0") && names.includes("run:r51"));
 });
 
 test("missing secrets are reported", async () => {

@@ -15,6 +15,7 @@ const OAUTH = "https://id.twitch.tv/oauth2";
 const SCOPES = "channel:manage:clips clips:edit";
 const SESSION_DAYS = 30;
 const MAX_RUNS = 50;
+const CLIP_URL = /^https:\/\/clips\.twitch\.tv\/[0-9A-Za-z_-]+$/;
 const enc = new TextEncoder();
 
 export default {
@@ -22,8 +23,9 @@ export default {
     try {
       return await route(request, env);
     } catch (e) {
+      // 詳しい内容は Cloudflare のログにだけ出す (ページを開いた人には見せない)
       console.error(e);
-      return text("エラーが発生しました: " + (e && e.message ? e.message : e), 500);
+      return text("エラーが発生しました。Cloudflare の Workers のログを確認してください", 500);
     }
   },
 };
@@ -38,10 +40,13 @@ async function route(request, env) {
   if (url.pathname === "/api/upload" && request.method === "POST") return upload(request, env);
   if (url.pathname === "/login") return login(url, env);
   if (url.pathname === "/callback") return callback(request, url, env);
-  if (url.pathname === "/logout") {
-    return new Response(null, { status: 302, headers: { Location: "/", "Set-Cookie": cookie("session", "", 0) } });
-  }
   const user = await currentUser(request, env);
+  if (url.pathname === "/logout" && request.method === "POST") {
+    if (!sameOrigin(request, url)) return text("不正なリクエストです", 403);
+    // ログイン状態の番号を進めて、ほかの端末に残っているログインもまとめて無効にする
+    if (user) await env.KV.put("session_version", String(Number((await env.KV.get("session_version")) || 0) + 1));
+    return new Response(null, { status: 303, headers: { Location: "/", "Set-Cookie": cookie("session", "", 0) } });
+  }
   if (url.pathname === "/api/clip" && request.method === "POST") {
     if (!user) return json({ error: "ログインしてください" }, 401);
     if (!sameOrigin(request, url)) return json({ error: "不正なリクエストです" }, 403);
@@ -65,31 +70,52 @@ async function upload(request, env) {
     return json({ error: "JSON ではありません" }, 400);
   }
   if (!run || typeof run.id !== "string" || !/^[0-9A-Za-z_-]{1,120}$/.test(run.id) ||
-      typeof run.vod_id !== "string" || !/^[0-9]{1,20}$/.test(run.vod_id) || !Array.isArray(run.items)) {
+      typeof run.vod_id !== "string" || !/^[0-9]{1,20}$/.test(run.vod_id) || !Array.isArray(run.items) ||
+      !run.items.every((it) => it && typeof it === "object")) {
     return json({ error: "形式が違います" }, 400);
   }
   const old = await getJSON(env, "run:" + run.id);
-  const items = run.items.slice(0, 50).map((it, i) => {
-    // 送り直しても、ページで作ったクリップは消さない
-    const prev = old && old.items && old.items[i];
+  const items = run.items.slice(0, 50).map((it) => {
+    const start = num(it.start);
+    // 送り直しても、ページで作ったクリップは消さない (同じ場面を開始時刻で探す)
+    const prev = old && Array.isArray(old.items) ? old.items.find((o) => sameScene(o, start)) : null;
     return {
-      start: num(it.start), end: num(it.end), score: num(it.score),
+      start, end: num(it.end), score: num(it.score),
       title: str(it.title, 100), hook: str(it.hook, 40), category: str(it.category, 20), reason: str(it.reason, 200),
       short: !!it.short, clip_end: Math.ceil(num(it.clip_end)), clip_duration: num(it.clip_duration),
-      twitch_clip: str(it.twitch_clip, 300) || (prev && prev.start === num(it.start) ? prev.twitch_clip || "" : ""),
+      twitch_clip: clipUrl(it.twitch_clip) || (prev ? clipUrl(prev.twitch_clip) : ""),
     };
   });
+  const uploadedAt = new Date().toISOString();
   const record = {
     id: run.id, channel: str(run.channel, 50), stream_title: str(run.stream_title, 200), vod_id: run.vod_id,
-    uploaded_at: new Date().toISOString(), items,
+    uploaded_at: uploadedAt, items,
   };
-  await env.KV.put("run:" + run.id, JSON.stringify(record));
-  const index = ((await getJSON(env, "runs")) || []).filter((id) => id !== run.id);
-  index.unshift(run.id);
-  const removed = index.splice(MAX_RUNS);
-  await env.KV.put("runs", JSON.stringify(index));
-  for (const id of removed) await env.KV.delete("run:" + id);
+  // 一覧は KV の list で作る (別の索引を持たないので、同時に送られても取りこぼさない)
+  await env.KV.put("run:" + run.id, JSON.stringify(record), { metadata: { uploaded_at: uploadedAt } });
+  const runs = await listRuns(env);
+  await Promise.all(runs.slice(MAX_RUNS).map((r) => env.KV.delete(r.name)));
   return json({ ok: true, items: items.length });
+}
+
+async function listRuns(env) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await env.KV.list({ prefix: "run:", cursor });
+    keys.push(...page.keys);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  // 新しい順
+  return keys.sort((a, b) => String((b.metadata || {}).uploaded_at || "").localeCompare(String((a.metadata || {}).uploaded_at || "")));
+}
+
+function sameScene(item, start) {
+  return item && Math.abs(num(item.start) - start) < 0.05;
+}
+
+function clipUrl(v) {
+  return typeof v === "string" && CLIP_URL.test(v) ? v : "";
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +164,8 @@ async function callback(request, url, env) {
     expires_at: Date.now() + (tok.expires_in || 3600) * 1000, user_id: info.user_id, login: info.login,
   }));
   const exp = Date.now() + SESSION_DAYS * 86400 * 1000;
-  const value = info.login + "." + exp;
+  const version = Number((await env.KV.get("session_version")) || 0);
+  const value = info.login + "." + exp + "." + version;
   const session = value + "." + (await hmac(env.SESSION_SECRET, value));
   const headers = new Headers({ Location: "/" });
   headers.append("Set-Cookie", cookie("session", session, SESSION_DAYS * 86400));
@@ -157,11 +184,13 @@ async function currentUser(request, env) {
   const raw = readCookie(request, "session");
   if (!raw) return null;
   const parts = raw.split(".");
-  if (parts.length !== 3) return null;
-  const [login, exp, sig] = parts;
-  if (!safeEqual(sig, await hmac(env.SESSION_SECRET, login + "." + exp))) return null;
+  if (parts.length !== 4) return null;
+  const [login, exp, version, sig] = parts;
+  if (!safeEqual(sig, await hmac(env.SESSION_SECRET, login + "." + exp + "." + version))) return null;
   if (Number(exp) < Date.now()) return null;
   if (login.toLowerCase() !== (env.ALLOWED_LOGIN || "").toLowerCase()) return null;
+  // ログアウトすると番号が進み、それより前のログインは使えなくなる
+  if (Number(version) !== Number((await env.KV.get("session_version")) || 0)) return null;
   return login;
 }
 
@@ -176,7 +205,12 @@ async function accessToken(env, forceRefresh = false) {
       grant_type: "refresh_token", refresh_token: tok.refresh_token,
     }),
   });
-  if (!r.ok) throw new Error("Twitch のログインの更新に失敗しました。ログインし直してください");
+  if (!r.ok) {
+    // 同時に押された別のボタンが先に更新した場合は、その新しいトークンを使う
+    const latest = await getJSON(env, "token");
+    if (latest && latest.access_token !== tok.access_token && latest.expires_at > Date.now() + 60000) return latest;
+    throw new Error("Twitch のログインの更新に失敗しました。ログインし直してください");
+  }
   const n = await r.json();
   const updated = {
     ...tok, access_token: n.access_token, refresh_token: n.refresh_token || tok.refresh_token,
@@ -198,9 +232,10 @@ async function createClip(request, env) {
     return json({ error: "JSON ではありません" }, 400);
   }
   const run = await getJSON(env, "run:" + String(body.run || ""));
-  const index = Number(body.index);
-  const item = run && Number.isInteger(index) ? run.items[index] : null;
-  if (!item) return json({ error: "場面が見つかりません" }, 404);
+  // 並び順は送り直しで変わることがあるので、場面は開始時刻で探す
+  const start = num(body.start);
+  const item = run && Array.isArray(run.items) ? run.items.find((it) => sameScene(it, start)) : null;
+  if (!item) return json({ error: "場面が見つかりません (ページを読み込み直してください)" }, 404);
   if (item.twitch_clip) return json({ url: item.twitch_clip, existing: true });
 
   let tok = await accessToken(env);
@@ -211,7 +246,7 @@ async function createClip(request, env) {
   });
   if (item.title) params.set("title", item.title.slice(0, 100));
   let r;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     r = await fetch(HELIX + "/videos/clips?" + params.toString(), {
       method: "POST",
       headers: { "Client-Id": env.TWITCH_CLIENT_ID, Authorization: "Bearer " + tok.access_token },
@@ -224,6 +259,12 @@ async function createClip(request, env) {
       params.delete("title"); // タイトルを受け付けない場合はタイトル無しで作る
       continue;
     }
+    if (r.status === 429 && attempt < 3) {
+      // 回数制限: 制限が解ける時刻まで待つ (長くても 5 秒)
+      const reset = Number(r.headers.get("Ratelimit-Reset")) * 1000;
+      await new Promise((ok) => setTimeout(ok, Math.min(5000, Math.max(1000, (reset || 0) - Date.now()))));
+      continue;
+    }
     break;
   }
   if (r.status === 403) return json({ error: "クリップを作る権限がありません (ログインし直してください)" }, 403);
@@ -232,12 +273,15 @@ async function createClip(request, env) {
   }
   const data = ((await r.json()).data || [])[0];
   if (!data) return json({ error: "クリップ作成の応答が空でした" }, 502);
-  const clipUrl = data.id ? "https://clips.twitch.tv/" + data.id : data.edit_url || "";
+  const made = clipUrl(data.id ? "https://clips.twitch.tv/" + data.id : "");
   // 同時に別のボタンが押されても消えないよう、読み直してから書く
   const latest = (await getJSON(env, "run:" + run.id)) || run;
-  if (latest.items[index]) latest.items[index].twitch_clip = clipUrl;
-  await env.KV.put("run:" + run.id, JSON.stringify(latest));
-  return json({ url: clipUrl, edit_url: data.edit_url || "" });
+  const target = latest.items.find((it) => sameScene(it, start));
+  if (target && made) {
+    target.twitch_clip = made;
+    await env.KV.put("run:" + run.id, JSON.stringify(latest), { metadata: { uploaded_at: latest.uploaded_at } });
+  }
+  return json({ url: made || data.edit_url || "", edit_url: data.edit_url || "" });
 }
 
 // ---------------------------------------------------------------------------
@@ -251,16 +295,13 @@ async function page(env, user) {
       <p class="muted">配信後に自動で見つけた場面の一覧です。配信者のアカウントでログインしてください。</p>
       <a class="btn" href="/login">Twitch でログイン</a>`));
   }
-  const ids = (await getJSON(env, "runs")) || [];
-  const runs = [];
-  for (const id of ids.slice(0, 20)) {
-    const run = await getJSON(env, "run:" + id);
-    if (run) runs.push(run);
-  }
+  const keys = (await listRuns(env)).slice(0, 20);
+  const runs = (await Promise.all(keys.map((k) => getJSON(env, k.name)))).filter(Boolean);
   // JSON は <script> の中に置く。"<" を逃がして、文字列の中から </script> で抜け出せないようにする
   const data = JSON.stringify(runs).replace(/</g, "\\u003c");
   return html(layout(`
-    <header><h1>切り抜き候補</h1><span class="muted">${escapeHtml(user)} でログイン中 · <a href="/logout">ログアウト</a></span></header>
+    <header><h1>切り抜き候補</h1><form method="post" action="/logout" class="muted">${escapeHtml(user)} でログイン中 ·
+      <button class="link" type="submit">ログアウト</button></form></header>
     <p class="muted">「クリップを作る」で、その場面を配信の VOD から Twitch クリップにします。★ はショートにした場面です。</p>
     <div id="runs"></div>
     <script id="data" type="application/json">${data}</script>
@@ -274,7 +315,9 @@ const hms = (t) => { t = Math.max(0, Math.floor(t)); const h = Math.floor(t / 36
   return (h ? h + ":" : "") + String(m).padStart(h ? 2 : 1, "0") + ":" + String(s).padStart(2, "0"); };
 const vodTime = (t) => { t = Math.max(0, Math.floor(t)); return Math.floor(t / 3600) + "h" + Math.floor(t % 3600 / 60) + "m" + (t % 60) + "s"; };
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-function clipLink(url) { const a = el("a", "clip", "クリップを見る"); a.href = url; a.target = "_blank"; a.rel = "noopener"; return a; }
+function clipLink(url) {
+  if (!/^https:\\/\\/clips\\.twitch\\.tv\\//.test(url)) return el("span", "muted", "作成しました");
+  const a = el("a", "clip", "クリップを見る"); a.href = url; a.target = "_blank"; a.rel = "noopener"; return a; }
 if (!runs.length) root.append(el("p", "muted", "まだ一覧がありません。配信が終わると twitch-shorts から送られてきます。"));
 for (const run of runs) {
   const sec = el("section", "run");
@@ -282,7 +325,7 @@ for (const run of runs) {
   head.append(el("h2", null, run.stream_title || run.channel || "配信"));
   head.append(el("span", "muted", new Date(run.uploaded_at).toLocaleString("ja-JP") + " · VOD " + run.vod_id));
   sec.append(head);
-  run.items.forEach((it, i) => {
+  run.items.forEach((it) => {
     const row = el("div", "item" + (it.short ? " short" : ""));
     const time = el("a", "time", hms(it.start) + "〜" + hms(it.end));
     time.href = "https://www.twitch.tv/videos/" + run.vod_id + "?t=" + vodTime(it.start); time.target = "_blank"; time.rel = "noopener";
@@ -299,7 +342,7 @@ for (const run of runs) {
         btn.disabled = true; btn.textContent = "作成中…";
         try {
           const r = await fetch("/api/clip", { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ run: run.id, index: i }) });
+            body: JSON.stringify({ run: run.id, start: it.start }) });
           const res = await r.json();
           if (!r.ok) throw new Error(res.error || r.status);
           action.replaceChildren(clipLink(res.url));
@@ -333,6 +376,7 @@ a{color:var(--accent)}.muted{color:var(--muted)}.small{font-size:13px}
 .item:last-child{border-bottom:0}.item.short{background:var(--star)}
 .time{font-variant-numeric:tabular-nums;font-size:14px}.title{font-weight:600}
 .clip{white-space:nowrap}
+button.link{background:none;border:0;padding:0;color:var(--accent);font:inherit;cursor:pointer;text-decoration:underline}
 @media (max-width:560px){.item{grid-template-columns:1fr;gap:4px}}
 </style></head><body><main>${body}</main></body></html>`;
 }
