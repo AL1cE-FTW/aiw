@@ -159,7 +159,7 @@ def process(
     n_pool = n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1)
     # 一覧ページ (worker/) に送るときは、次点の候補も載せられるよう多めに検出する
     want_web = bool(cfg.web.url and cfg.web.upload_token and clip_vod and publish and not dry_run)
-    if cfg.web.url and not cfg.web.upload_token:
+    if cfg.web.url and not cfg.web.upload_token and clip_vod and publish and not dry_run:
         log.warning("[web] url はありますが upload_token が無いため、切り抜き候補ページには送りません")
     n_extra = WEB_EXTRA_CANDIDATES if want_web else 0
     n_candidates = n_pool + n_extra + len(exclude) * 2

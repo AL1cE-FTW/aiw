@@ -184,3 +184,18 @@ test("missing secrets are reported", async () => {
   assert.equal(res.status, 500);
   assert.match(await res.text(), /SESSION_SECRET/);
 });
+
+test("bad scene requests and expired logins are answered as JSON", async () => {
+  const env = makeEnv();
+  await upload(env, { ...run, items: [{ ...run.items[0], start: 0 }] });
+  const cookie = sessionFrom(await loginCookie(env));
+  const post = (body) => worker.fetch(req("/api/clip", { method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookie, Origin: ORIGIN }, body: JSON.stringify(body) }), env);
+  assert.equal((await post({ run: run.id })).status, 400); // start が無いのに 0 秒の場面を作らない
+  assert.equal((await post({ run: run.id, start: "abc" })).status, 400);
+
+  kv.delete("token");
+  const res = await post({ run: run.id, start: 0 });
+  assert.equal(res.status, 401);
+  assert.match((await res.json()).error, /ログイン/);
+});

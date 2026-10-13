@@ -233,12 +233,20 @@ async function createClip(request, env) {
   }
   const run = await getJSON(env, "run:" + String(body.run || ""));
   // 並び順は送り直しで変わることがあるので、場面は開始時刻で探す
-  const start = num(body.start);
+  if (body.start === null || body.start === "" || !Number.isFinite(Number(body.start))) {
+    return json({ error: "場面の指定が正しくありません" }, 400);
+  }
+  const start = Number(body.start);
   const item = run && Array.isArray(run.items) ? run.items.find((it) => sameScene(it, start)) : null;
   if (!item) return json({ error: "場面が見つかりません (ページを読み込み直してください)" }, 404);
   if (item.twitch_clip) return json({ url: item.twitch_clip, existing: true });
 
-  let tok = await accessToken(env);
+  let tok;
+  try {
+    tok = await accessToken(env);
+  } catch (e) {
+    return json({ error: e.message }, 401); // ログインし直してもらう
+  }
   const params = new URLSearchParams({
     broadcaster_id: tok.user_id, editor_id: tok.user_id, vod_id: run.vod_id,
     vod_offset: String(Math.max(item.clip_end, Math.ceil(item.clip_duration))),
@@ -252,7 +260,11 @@ async function createClip(request, env) {
       headers: { "Client-Id": env.TWITCH_CLIENT_ID, Authorization: "Bearer " + tok.access_token },
     });
     if (r.status === 401 && attempt === 0) {
-      tok = await accessToken(env, true);
+      try {
+        tok = await accessToken(env, true);
+      } catch (e) {
+        return json({ error: e.message }, 401);
+      }
       continue;
     }
     if (r.status === 400 && params.has("title") && (await r.clone().text()).toLowerCase().includes("title")) {
@@ -281,7 +293,7 @@ async function createClip(request, env) {
     target.twitch_clip = made;
     await env.KV.put("run:" + run.id, JSON.stringify(latest), { metadata: { uploaded_at: latest.uploaded_at } });
   }
-  return json({ url: made || data.edit_url || "", edit_url: data.edit_url || "" });
+  return json({ url: made, edit_url: data.edit_url || "" });
 }
 
 // ---------------------------------------------------------------------------
