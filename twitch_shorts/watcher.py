@@ -200,9 +200,19 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     run_dir = Path(cfg.output_dir) / channel / stamp
     chat_path = session_dir / "chat.jsonl"
 
+    record = cfg.watch.record
+    if not record and helix is None:
+        log.warning("録画しない設定 ([watch] record = false) ですが、Twitch の API キーが無く VOD を探せないため録画します")
+        record = True
+
+    def start_recorder(path: Path):
+        if record:
+            return start_live_recording(channel, path, cfg.watch.recorder, cfg.watch.quality)
+        return _NoRecorder(helix, channel, checker, cfg.watch.poll_interval)
+
     parts = [(session_dir / "stream.ts", 0.0)]
     _save_parts(session_dir, parts)
-    proc = start_live_recording(channel, parts[0][0], cfg.watch.recorder, cfg.watch.quality)
+    proc = start_recorder(parts[0][0])
     start_time = time.time()
     chat_rec = LiveChatRecorder(channel, chat_path, start_time, cfg.twitch.irc_oauth_token, cfg.twitch.irc_nick)
     chat_rec.start()
@@ -223,7 +233,10 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             viewer_rec.start()
         else:
             log.info("Twitch API の認証情報が無いため、同時視聴者数は記録しません")
-        log.info("録画中: %s / チャット: %s", parts[0][0], chat_path)
+        if record:
+            log.info("録画中: %s / チャット: %s", parts[0][0], chat_path)
+        else:
+            log.info("録画はせず、チャットと同時視聴者数だけ記録しています: %s (配信後に VOD から作ります)", chat_path)
         quick_failures = 0
         while True:
             part_started = time.time()
@@ -255,7 +268,8 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             if quick_failures:
                 _sleep_checking_stop(RESTART_BACKOFF_SECONDS)
             part = session_dir / f"stream_{len(parts) + 1}.ts"
-            log.warning("録画が途切れましたが配信は続いています。録り直します (%s)", part.name)
+            if record:
+                log.warning("録画が途切れましたが配信は続いています。録り直します (%s)", part.name)
             # 録画を始める前に一覧に載せる (録画中に停電しても、次回の起動時にこのファイルも処理できるように)
             parts.append((part, time.time() - start_time))
             try:
@@ -263,7 +277,7 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
             except OSError as e:
                 log.error("録画ファイルの一覧を保存できませんでした: %s", e)
             try:
-                proc = start_live_recording(channel, part, cfg.watch.recorder, cfg.watch.quality)
+                proc = start_recorder(part)
             except Exception as e:  # 録画ツールが起動できない等: ここまでの分を処理する
                 log.error("録画を再開できませんでした。ここまでの分を処理します: %s", e)
                 break
@@ -283,12 +297,14 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     if interrupted and proc.returncode not in (0, None, -15) and recorder_log_tail(proc):
         log.warning("録画プロセスの出力: %s", recorder_log_tail(proc))
     if not _load_parts(session_dir):
-        log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
+        if record:
+            log.error("録画ファイルがありません。チャンネル名や録画ツールを確認してください")
         if helix is None:  # VOD も探せないので作れない
             if interrupted or _STOP.is_set():
                 raise KeyboardInterrupt
             return [h for hs in previews.values() for h in hs]
-        log.info("記録したチャットと VOD から作ります")
+        if record:
+            log.info("記録したチャットと VOD から作ります")
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
     # 配信が終わっていれば VOD も完成している (途中で止めた場合は、残りを latest などで作れるよう完成扱いにしない)
     ended = stream_ended and not interrupted and not _STOP.is_set()
@@ -298,6 +314,32 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         # Ctrl+C / 停止の指示は「止める」意味なので、配信が続いていても次の録画は始めずに終了する
         raise KeyboardInterrupt
     return result
+
+
+class _NoRecorder:
+    """録画しない設定 ([watch] record = false) のときに録画プロセスの代わりに使う。配信が終わったら終了扱い。"""
+
+    def __init__(self, helix, channel: str, checker: LiveChecker | None, interval: float):
+        self.helix, self.channel, self.checker = helix, channel, checker
+        self.interval = max(5.0, float(interval))
+        self.returncode: int | None = None
+        self._next_check = time.time() + self.interval
+
+    def poll(self) -> int | None:
+        if self.returncode is None and time.time() >= self._next_check:
+            self._next_check = time.time() + self.interval
+            if not _still_live(self.helix, self.channel, self.checker):
+                self.returncode = 0
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        if self.returncode is None:
+            self.returncode = -15
+
+    kill = terminate
 
 
 # 録画できないまま配信の終了を待つ最長時間 (配信状態の確認が失敗し続けても、いつかは先へ進む)
