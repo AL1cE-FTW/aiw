@@ -61,6 +61,7 @@ pip install -e .                 # 基本機能
 pip install -e '.[transcribe]'   # 字幕を付ける場合 (faster-whisper)
 pip install -e '.[llm]'          # Claude で評価・タイトル生成する場合
 pip install -e '.[gemini]'       # Gemini (無料枠あり) で評価・タイトル生成する場合
+pip install -e '.[tray]'         # タスクトレイのアイコンで自動処理を切り替える場合 (twitch-shorts tray)
 cp config.example.toml config.toml
 ```
 

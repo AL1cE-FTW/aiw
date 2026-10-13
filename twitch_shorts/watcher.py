@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import signal
 import threading
@@ -709,9 +710,26 @@ def process_leftovers(cfg: Config, channel: str, dry_run: bool = False, checker:
                 log.error("失敗の回数を記録できませんでした (%s): %s", attempts_file, e)
 
 
+# このファイルが作られたら止まる (タスクトレイのアイコンから止めるため。Windows では外からシグナルを送れない)
+STOP_FILE_ENV = "TWITCH_SHORTS_STOP_FILE"
+
+
+def _watch_stop_file(path: Path) -> None:
+    """停止のファイルができたら、Ctrl+C と同じく「ここまでの分を処理して終了」する。"""
+    while not _STOP.is_set():
+        if path.exists():
+            log.info("停止の指示を受けました。いまの処理が終わったら終了します")
+            _STOP.set()
+            return
+        time.sleep(2)
+
+
 def watch(cfg: Config, channel: str, once: bool = False, dry_run: bool = False) -> None:
     _STOP.clear()
     _stop_on_terminate()
+    stop_file = os.environ.get(STOP_FILE_ENV)
+    if stop_file:
+        threading.Thread(target=_watch_stop_file, args=(Path(stop_file),), daemon=True, name="stop-file").start()
     checker = LiveChecker(cfg)
 
     def start_leftovers() -> None:

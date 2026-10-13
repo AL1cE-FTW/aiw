@@ -142,6 +142,12 @@ def _is_current_stream(video, stream: dict) -> bool:
         return True  # 分からなければ、安全側 (配信中とみなして後回し) に倒す
 
 
+def cmd_tray(cfg: Config, args: argparse.Namespace) -> int:
+    from .tray import run_tray
+
+    return run_tray(args.channel.lower(), cfg.work_dir, cfg.output_dir, args.config)
+
+
 def cmd_login(cfg: Config, args: argparse.Namespace) -> int:
     from .twitch_auth import TwitchAuthError, device_login
 
@@ -350,6 +356,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-twitch-clips", action="store_true", help="Twitch の公式クリップは作らない")
     add_render_opts(sp, twitch_clips=False)  # auto はログイン状態から自動で決める
     sp.set_defaults(func=cmd_auto)
+
+    sp = sub.add_parser("tray", help="タスクトレイにアイコンを常駐させ、自動処理 (auto) をメニューで切り替える")
+    sp.add_argument("channel", nargs="?", default="yuuki_ftw")
+    sp.set_defaults(func=cmd_tray)
 
     sp = sub.add_parser("login", help="配信者アカウントで Twitch にログイン (公式クリップの自動作成用)")
     sp.set_defaults(func=cmd_login)
