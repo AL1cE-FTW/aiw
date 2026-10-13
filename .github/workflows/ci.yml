@@ -16,3 +16,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
       - run: pip install -e '.[dev]'
       - run: pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test the Cloudflare worker (切り抜き候補ページ)
+        run: node --test
+        working-directory: worker

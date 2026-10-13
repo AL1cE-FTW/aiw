@@ -20,6 +20,9 @@ from .render import render_highlight
 
 log = logging.getLogger(__name__)
 
+# 一覧ページに載せる次点の候補の数
+WEB_EXTRA_CANDIDATES = 10
+
 
 class MediaSource(Protocol):
     def audio_path(self) -> str | None: ...
@@ -153,7 +156,13 @@ def process(
         raise ValueError("チャット・音声・クリップのいずれも無いため検出できません")
 
     n_target = cfg.detect.top_n
-    n_candidates = n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1) + len(exclude) * 2
+    n_pool = n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1)
+    # 一覧ページ (worker/) に送るときは、次点の候補も載せられるよう多めに検出する
+    want_web = bool(cfg.web.url and cfg.web.upload_token and clip_vod and publish and not dry_run)
+    if cfg.web.url and not cfg.web.upload_token and clip_vod and publish and not dry_run:
+        log.warning("[web] url はありますが upload_token が無いため、切り抜き候補ページには送りません")
+    n_extra = WEB_EXTRA_CANDIDATES if want_web else 0
+    n_candidates = n_pool + n_extra + len(exclude) * 2
     candidates, score = detect_highlights(
         duration, chat, cfg.detect, loudness, clips, top_n=n_candidates, viewers=viewers
     )
@@ -163,7 +172,8 @@ def process(
         and (available_until is None or h.end <= available_until)
         and (available_from is None or h.start >= available_from)
     ]
-    candidates = candidates[: n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1)]
+    extras = candidates[n_pool:n_pool + n_extra]  # ショートの対象外。一覧ページにだけ載せる
+    candidates = candidates[:n_pool]
     log.info("候補 %d 件を検出", len(candidates))
 
     transcripts: dict[int, list[TranscriptSegment]] = {}
@@ -219,6 +229,17 @@ def process(
         _make_twitch_clips(cfg, rendered, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
                            owner=channel if clip_owner is None else clip_owner)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
+    if want_web:
+        # 配信後の一覧ページ (worker/) に、ショートにした場面と次点の候補を送る
+        from .web_upload import build_payload, run_id_for, upload_run
+
+        chosen = {id(h) for h in selected}
+        listed = selected + [h for h in candidates + extras if id(h) not in chosen]
+        for h in listed:
+            if not h.title:
+                h.title = f"{_hms(h.start, ':')} の場面"
+        upload_run(cfg, build_payload(run_id_for(clip_vod[0], run_dir.name), channel, stream_title, clip_vod[0],
+                                      clip_vod[1], listed, selected))
     try:
         from .review import write_review_page
 

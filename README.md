@@ -217,6 +217,9 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_YYYYMMDD/config.tuned.
 - `twitch-shorts login` しておくと、検出した場面を Twitch の **Create Clip From VOD** API (オープンベータ) で
   公式クリップとしても作ります (`auto` では自動で有効。`vod` / `latest` は `--twitch-clips`)。
   配信中の録画とその配信の VOD は、録画開始の遅れを補正して位置を合わせます。
+- **切り抜き候補ページ** (任意、`worker/`): 配信後に見つけた場面の一覧を Cloudflare Workers のページに送ります。
+  Twitch でログインした配信者だけが見られ、各場面の「クリップを作る」でその VOD から Twitch クリップを作れます。
+  `config.toml` の `[web]` で設定 (準備の手順は [docs/GUIDE.md](docs/GUIDE.md) の「切り抜き候補ページ」)。
 
 ## 仕組みと注意点
 
@@ -236,6 +239,7 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_YYYYMMDD/config.tuned.
 ```bash
 pip install -e '.[dev]'
 pytest -q
+(cd worker && node --test)   # 切り抜き候補ページ (Cloudflare Worker)
 ```
 
 テストは合成した動画・チャットで検出〜レンダリングまでを実際に実行します。

@@ -1,0 +1,14 @@
+# 配信後の切り抜き候補ページ (worker/index.js) を Cloudflare Workers に置く設定。
+# GitHub 連携 (Workers Builds) で push のたびに npx wrangler deploy される。
+# シークレット (TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET / UPLOAD_TOKEN / SESSION_SECRET) は
+# Cloudflare のダッシュボードで登録する (docs/GUIDE.md の「切り抜き候補ページ」)。
+name = "aiw"
+main = "worker/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+ALLOWED_LOGIN = "yuuki_ftw"
+
+# ID を書かなければ、初回のデプロイで KV が自動で作られる (wrangler 4.45 以降)
+[[kv_namespaces]]
+binding = "KV"
