@@ -139,7 +139,7 @@ LLM_PROVIDERS = ("claude", "gemini")
 
 def normalize_provider(value) -> str:
     """[llm] provider をそろえる ("Gemini " → "gemini")。使えない値なら ValueError。"""
-    provider = str(value or "claude").strip().lower()
+    provider = "claude" if value is None or value == "" else str(value).strip().lower()
     if provider not in LLM_PROVIDERS:
         raise ValueError(f"[llm] provider は {' / '.join(LLM_PROVIDERS)} のどれかにしてください: {value}")
     return provider

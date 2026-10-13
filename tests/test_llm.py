@@ -144,3 +144,23 @@ def test_misspelled_provider_stops_at_config_load(tmp_path):
     load_config(str(p))  # AI を使わない設定なら止めない
     p.write_text('[llm]\nprovider = " Gemini "\n', encoding="utf-8")
     assert load_config(str(p)).llm.provider == "gemini"
+
+
+def test_llm_flag_with_misspelled_provider_exits(tmp_path, monkeypatch):
+    from twitch_shorts import cli
+
+    p = tmp_path / "config.toml"
+    p.write_text('[llm]\nprovider = "Gemni"\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "cmd_local", lambda cfg, args: 0, raising=False)
+    assert cli.main(["-c", str(p), "local", str(tmp_path / "x.mp4"), "--llm"]) == 2
+    assert cli.main(["-c", str(tmp_path / "missing.toml"), "doctor"]) == 2
+
+
+def test_falsy_provider_is_rejected():
+    import pytest
+
+    from twitch_shorts.config import normalize_provider
+
+    with pytest.raises(ValueError):
+        normalize_provider(False)
+    assert normalize_provider(None) == "claude"

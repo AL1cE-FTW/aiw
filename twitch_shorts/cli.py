@@ -21,7 +21,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import Config, load_config
+from .config import Config, load_config, normalize_provider
 from .fileutil import add_processed_vod, processed_vods
 
 log = logging.getLogger("twitch_shorts")
@@ -411,10 +411,12 @@ def main(argv: list[str] | None = None) -> int:
     config_path = args.config or (["config.toml"] if Path("config.toml").exists() else None)
     try:
         cfg = load_config(config_path)
-    except ValueError as e:  # 設定の書き間違い
-        print(f"設定ファイル ({', '.join(map(str, config_path or []))}) に誤りがあります: {e}", file=sys.stderr)
+        _common_overrides(cfg, args)
+        if cfg.llm.enabled:  # --llm で AI をオンにした場合も、provider の誤りはここで止める
+            cfg.llm.provider = normalize_provider(cfg.llm.provider)
+    except (OSError, ValueError) as e:  # 設定ファイルが無い・書き間違い
+        print(f"設定ファイル ({', '.join(map(str, config_path or []))}) を読めませんでした: {e}", file=sys.stderr)
         return 2
-    _common_overrides(cfg, args)
     try:
         return args.func(cfg, args)
     except KeyboardInterrupt:
