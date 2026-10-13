@@ -51,8 +51,10 @@ model = "small"         # tiny / base / small / medium / large-v3
 language = "ja"
 
 [llm]
-enabled = false         # true にするには: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY
-model = "claude-opus-5-5"
+enabled = false         # true にすると AI が場面を評価し、タイトル・引きの言葉・説明文を作る
+provider = "claude"     # claude: pip install 'twitch-shorts[llm]' と ANTHROPIC_API_KEY (有料)
+                        # gemini: pip install 'twitch-shorts[gemini]' と GEMINI_API_KEY (無料枠あり)
+model = "claude-opus-5-5"  # gemini のときは "gemini-flash-latest" など (claude-... のままなら自動で切り替え)
 effort = "medium"
 
 [watch]

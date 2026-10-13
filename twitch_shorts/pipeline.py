@@ -179,11 +179,11 @@ def process(
             h.transcript = " ".join(s.text for s in segs if s.end > h.start and s.start < h.end)
 
     if cfg.llm.enabled and candidates:
-        from .llm import rerank_with_claude
+        from .llm import model_of, provider_of, rerank_with_llm
 
-        log.info("Claude で候補を評価中 (%s)", cfg.llm.model)
         try:
-            candidates = rerank_with_claude(
+            log.info("AI (%s) で候補を評価中 (%s)", provider_of(cfg.llm), model_of(cfg.llm))
+            candidates = rerank_with_llm(
                 candidates, cfg.llm, channel, stream_title,
                 cfg.detect.min_duration, cfg.detect.max_duration, client=llm_client,
             )
