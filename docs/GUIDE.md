@@ -183,6 +183,7 @@ twitch-shorts auto yuuki_ftw
 - **OFF**: 自動では起動しなくなります。いま動いている `auto` のウィンドウは、閉じれば止まります
 - すぐに起動したいときは `scripts\windows\start-auto.bat` をダブルクリック
 - 状態を確かめたいときは `Win + R` → `shell:startup` で開いたフォルダーに `twitch-shorts-auto` があれば ON
+- 失敗したとき (ファイルが使用中など) は「Failed to switch」と表示され、状態は変わりません
 
 (`register-startup.bat` は ON にするだけの以前の版です。)
 
