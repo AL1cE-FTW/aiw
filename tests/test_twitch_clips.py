@@ -2086,3 +2086,15 @@ def test_no_record_mode_falls_back_to_recording_without_api(tmp_path, monkeypatc
     cfg.watch.record = False
     watcher.record_and_process(cfg, "ch")  # API キー無し
     assert started == ["stream.ts"]
+
+
+def test_no_record_session_length_comes_from_meta_or_chat(tmp_path):
+    import json as _json
+
+    s = tmp_path / "s"
+    s.mkdir()
+    watcher._save_parts(s, [(s / "stream.ts", 0.0)])  # 録画ファイルは無い
+    (s / "chat.jsonl").write_text(_json.dumps({"offset": 1234.5, "user": "a", "text": "x"}) + "\n", encoding="utf-8")
+    assert watcher._session_length(s) == 1234.5  # 途中で止まった場合はチャットの最後まで
+    watcher._save_meta(s, start_time=1000.0, end_time=4600.0)
+    assert watcher._session_length(s) == 3600.0

@@ -204,6 +204,8 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
     if not record and helix is None:
         log.warning("録画しない設定 ([watch] record = false) ですが、Twitch の API キーが無く VOD を探せないため録画します")
         record = True
+    if not record and cfg.watch.rolling_minutes > 0:
+        log.warning("録画しない設定のため、配信中のプレビュー (rolling) は作りません")
 
     def start_recorder(path: Path):
         if record:
@@ -244,7 +246,7 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
                 time.sleep(5)
                 if _STOP.is_set():
                     raise KeyboardInterrupt
-                if cfg.watch.rolling_minutes > 0 and time.time() >= next_run:
+                if record and cfg.watch.rolling_minutes > 0 and time.time() >= next_run:
                     next_run = time.time() + cfg.watch.rolling_minutes * 60
                     done = previews.setdefault(parts[-1][0].name, [])
                     done += _preview(cfg, channel, session_dir, parts[-1], run_dir, done,
@@ -267,9 +269,12 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
                 break
             if quick_failures:
                 _sleep_checking_stop(RESTART_BACKOFF_SECONDS)
+            if not record:
+                # 録画していないので録り直すものは無い。配信の終了の確認を続ける
+                proc = start_recorder(session_dir / "stream.ts")
+                continue
             part = session_dir / f"stream_{len(parts) + 1}.ts"
-            if record:
-                log.warning("録画が途切れましたが配信は続いています。録り直します (%s)", part.name)
+            log.warning("録画が途切れましたが配信は続いています。録り直します (%s)", part.name)
             # 録画を始める前に一覧に載せる (録画中に停電しても、次回の起動時にこのファイルも処理できるように)
             parts.append((part, time.time() - start_time))
             try:
@@ -306,6 +311,10 @@ def record_and_process(cfg: Config, channel: str, helix=None, dry_run: bool = Fa
         if record:
             log.info("記録したチャットと VOD から作ります")
     log.info("配信終了。チャット %d 件。最終処理を行います", chat_rec.count)
+    try:
+        _save_meta(session_dir, end_time=time.time())  # 録画しない設定のとき、VOD のどこまでがこの記録かを知るため
+    except OSError as e:
+        log.error("記録の終わりの時刻を保存できませんでした: %s", e)
     # 配信が終わっていれば VOD も完成している (途中で止めた場合は、残りを latest などで作れるよう完成扱いにしない)
     ended = stream_ended and not interrupted and not _STOP.is_set()
     result = _final_pass(cfg, channel, helix, start_time, stream_started, session_dir, run_dir, dry_run,
@@ -431,9 +440,13 @@ def _final_pass(cfg: Config, channel: str, helix, start_time: float, stream_star
                     vod = (vod_id, shift, vod_duration)
         except Exception as e:
             log.warning("この配信の VOD を確認できませんでした: %s", e)
-        if vod is None:
+        if vod is None and _load_parts(session_dir):
             log.warning("この配信の VOD が見つからないため、録画から作ります (Twitch クリップは作りません。"
                         "Twitch の設定で「過去の配信を保存」を有効にすると作れます)")
+        elif vod is None:
+            # 録画しない設定: VOD が公開されるまで作れない。印を付けないので、次回の起動時にもう一度試す
+            log.warning("この配信の VOD が見つからないため、まだ作れません (録画しない設定のため)。"
+                        "次回の起動時にもう一度探します。Twitch の「過去の配信を保存」がオンか確認してください")
     result = None
     others = _highlights_of_vod(cfg, channel, vod[0], session_dir) if vod else []
     if vod and others:
@@ -575,12 +588,22 @@ def _stream_started_at(helix, channel: str) -> float | None:
 
 
 def _session_length(session_dir: Path) -> float:
-    """録画開始から最後の録画ファイルの終わりまでの秒数 (おおよそ)。"""
+    """録画開始から最後の録画ファイルの終わりまでの秒数 (おおよそ)。
+
+    録画が無い場合 (録画しない設定など) は、記録の終わりの時刻か、チャット・視聴者数の最後の時刻から求める。
+    """
     from .audio import probe_duration
 
     parts = _load_parts(session_dir)
     if not parts:
-        return 0.0
+        meta = _load_meta(session_dir)
+        try:
+            if meta.get("end_time") and meta.get("start_time"):
+                return max(0.0, float(meta["end_time"]) - float(meta["start_time"]))
+        except (TypeError, ValueError):
+            pass
+        chat, viewers = _load_signals(session_dir)
+        return max([m.offset for m in chat] + [v.offset for v in viewers or []] + [0.0])
     video, offset = parts[-1]
     try:
         return offset + probe_duration(str(video))
