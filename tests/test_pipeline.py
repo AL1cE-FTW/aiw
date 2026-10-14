@@ -102,3 +102,27 @@ def test_vod_source_renders_from_section_with_offset(make_stream, tmp_path, monk
     assert a <= h.start and h.end <= b
     # 冒頭の先見せ (hook_seconds) + 本編
     assert abs(probe_duration(h.output_path) - (h.duration + cfg.render.hook_seconds)) < 0.3
+
+
+def test_download_audio_ignores_partial_file(tmp_path, monkeypatch):
+    # 中断で残った audio.mp4.part を完成品として使わず、ダウンロードし直す
+    from twitch_shorts import download as dl
+
+    (tmp_path / "audio.mp4.part").write_bytes(b"partial")
+
+    class FakeYDL:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download):
+            (tmp_path / "audio.mp4").write_bytes(b"full")
+            return {}
+
+        def prepare_filename(self, info):
+            return str(tmp_path / "audio.mp4")
+
+    monkeypatch.setattr(dl, "_ydl", lambda opts: FakeYDL())
+    assert dl.download_audio("url", tmp_path).name == "audio.mp4"

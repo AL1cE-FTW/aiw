@@ -44,3 +44,26 @@ def test_review_page_survives_html_comment_and_tiny_series(tmp_path):
     assert "<" not in body and ">" not in body and "&" not in body
     assert json.loads(body)["items"][0]["chat"] == ["<!--<script>", "a & b"]
     assert "pts.length < 2" in page
+
+
+def test_portal_lists_every_run_with_publish_date(tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from twitch_shorts.review import write_portal
+    from twitch_shorts.schedule import add_to_schedule
+
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    hs = []
+    for run, title in (("a_1", "配信A"), ("b_2", "")):
+        h = Highlight(start=0, end=30, peak=10, score=5, title="</script>", output_path=str(tmp_path / "out" / run / "s.mp4"))
+        (tmp_path / "out" / run).mkdir(parents=True)
+        (tmp_path / "out" / run / "highlights.json").write_text(
+            json.dumps({"stream_title": title, "highlights": [h.to_dict()]}), encoding="utf-8")
+        hs.append(h)
+    add_to_schedule(cfg, hs[:1], now=datetime(2026, 10, 6, 9, 0, tzinfo=ZoneInfo("Asia/Tokyo")))
+    page = write_portal(cfg).read_text(encoding="utf-8")
+    items = json.loads(re.search(r"const ITEMS = (.*);\n", page).group(1))
+    assert [(i["stream"], i["video"], i["publish_at"][:10]) for i in items] == [
+        ("配信A", "a_1/s.mp4", "2026-10-06"), ("b_2", "b_2/s.mp4", "")]
+    assert "</script>\"" not in page

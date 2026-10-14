@@ -164,3 +164,80 @@ def test_falsy_provider_is_rejected():
     with pytest.raises(ValueError):
         normalize_provider(False)
     assert normalize_provider(None) == "claude"
+
+
+# --- Gemini が音声を聞いて場面を選ぶ ---------------------------------------------
+
+class FakeGeminiFiles:
+    def __init__(self, text):
+        self.deleted = None
+        self.contents = None
+        outer = self
+
+        class Files:
+            def upload(self, file):
+                return SimpleNamespace(name="files/1", state=SimpleNamespace(name="PROCESSING"))
+
+            def get(self, name):
+                return SimpleNamespace(name=name, state=SimpleNamespace(name="ACTIVE"))
+
+            def delete(self, name):
+                outer.deleted = name
+
+        class Models:
+            def generate_content(self, **kwargs):
+                outer.contents = kwargs["contents"]
+                return SimpleNamespace(text=text)
+
+        self.files = Files()
+        self.models = Models()
+
+
+def test_gemini_scan_audio_picks_moments(monkeypatch):
+    from twitch_shorts import llm
+
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    text = json.dumps({"moments": [
+        {"start": "0:10:00", "end": "0:10:30", "score": 9, "title": "t", "hook": "h", "category": "面白い",
+         "description": "d", "hashtags": ["apex", "#yuuki"], "reason": "爆笑"},
+        {"start": "10:20", "end": "10:40", "score": 5, "title": "重なり", "hook": "", "category": "その他",
+         "description": "", "hashtags": [], "reason": ""},  # 1 件目と重なる → 捨てる
+        {"start": "1:59:55", "end": "2:05:00", "score": 7, "title": "最後", "hook": "", "category": "その他",
+         "description": "", "hashtags": [], "reason": ""},  # 終わりを超える → 配信の長さに収める
+        {"start": "x", "end": "y", "score": 1},  # 読めない → 捨てる
+    ]})
+    client = FakeGeminiFiles(text)
+    found = llm.scan_audio_with_gemini("a.mp4", LLMConfig(provider="gemini"), "c", "s", 7200, 15, 59, 9,
+                                       client=client)
+    assert [(h.start, h.end, h.title) for h in found] == [(600, 630, "t"), (7185, 7200, "最後")]
+    assert found[0].signals == {"ai": 9} and found[0].hashtags == ["#apex", "#yuuki"]
+    assert client.deleted == "files/1" and client.contents[0].state.name == "ACTIVE"
+
+
+def test_gemini_rerank_watches_candidate_videos(monkeypatch):
+    from twitch_shorts import llm
+
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    cands = [Highlight(start=10, end=40, peak=20, score=5.0), Highlight(start=100, end=130, peak=110, score=4.0)]
+    text = json.dumps({"candidates": [
+        {"id": 0, "score": 2, "title": "a", "hook": "", "category": "その他", "description": "", "hashtags": [],
+         "reason": "", "start": 10, "end": 40},
+        {"id": 1, "score": 9, "title": "b", "hook": "", "category": "面白い", "description": "", "hashtags": [],
+         "reason": "", "start": 100, "end": 130},
+    ]})
+    client = FakeGeminiFiles(text)
+    out = rerank_with_llm(cands, LLMConfig(provider="gemini"), "c", "", 15, 59, client=client,
+                          videos={1: "v1.mp4"})
+    assert [h.title for h in out] == ["b", "a"]
+    # 文字情報 → 候補 1 の説明 → その映像 の順に送り、送った映像は消す
+    assert client.contents[1] == "候補 id=1 の映像 (映像の 0 秒 = この候補の start)"
+    assert client.contents[2].state.name == "ACTIVE" and client.deleted == "files/1"
+
+
+def test_require_stops_instead_of_signal_only():
+    import pytest
+
+    cands = [Highlight(start=0, end=30, peak=10, score=1.0)]
+    with pytest.raises(RuntimeError):
+        rerank_with_llm(cands, LLMConfig(provider="gemini", require=True), "c", "", 15, 59,
+                        client=FakeGemini(None, "SAFETY"))

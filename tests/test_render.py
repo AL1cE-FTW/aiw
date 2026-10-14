@@ -27,9 +27,10 @@ def test_build_ass_escapes_and_offsets_segments():
 
 def test_render_all_layouts(make_stream, tmp_path):
     video, _ = make_stream(duration=20, events=(5,))
-    for layout in ("blur", "crop", "facecam"):
-        cfg = RenderConfig(layout=layout, width=360, height=640, title_font_size=30, subtitle_font_size=24)
-        out = render_short(str(video), str(tmp_path / f"{layout}.mp4"), 2, 12, cfg, title="テスト",
+    for layout, game_crop in (("blur", 0), ("crop", 0), ("facecam", 0), ("facecam", 0.64), ("stack", 0.64)):
+        cfg = RenderConfig(layout=layout, width=360, height=640, title_font_size=30, subtitle_font_size=24,
+                           facecam_height_ratio=0.25, facecam_game_crop=game_crop)
+        out = render_short(str(video), str(tmp_path / f"{layout}{game_crop}.mp4"), 2, 12, cfg, title="テスト",
                            segments=[TranscriptSegment(3, 6, "字幕")])
         assert probe_video_size(out) == (360, 640)
         assert abs(probe_duration(out) - 10) < 0.3
@@ -40,3 +41,15 @@ def test_loudness_detects_loud_section(make_stream):
     loud = loudness_per_second(str(video))
     assert 29 <= len(loud) <= 31
     assert loud[12] - loud[25] > 15  # 大きい区間とそれ以外で 15dB 以上の差
+
+
+def test_frozen_ratio_detects_static_picture(tmp_path):
+    import subprocess
+
+    from twitch_shorts.audio import frozen_ratio
+
+    still, moving = str(tmp_path / "still.mp4"), str(tmp_path / "moving.mp4")
+    for src, out in (("color=c=gray:s=160x90:d=6", still), ("testsrc2=s=160x90:d=6", moving)):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", src, out], check=True)
+    assert frozen_ratio(still, 0, 6) > 0.9
+    assert frozen_ratio(moving, 0, 6) < 0.1

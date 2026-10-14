@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -176,6 +177,34 @@ def process(
     candidates = candidates[:n_pool]
     log.info("候補 %d 件を検出", len(candidates))
 
+    if cfg.llm.enabled and cfg.llm.scan_audio and cfg.llm.provider == "gemini" and apath:
+        from .llm import model_of, scan_audio_with_gemini
+
+        try:
+            log.info("AI (gemini) が配信の音声を聞いて面白い場面を探しています (%s)", model_of(cfg.llm))
+            with tempfile.TemporaryDirectory() as tmp:
+                speech = str(Path(tmp) / "speech.mp3")
+                audio_mod.speech_mp3(apath, speech)
+                found = scan_audio_with_gemini(
+                    speech, cfg.llm, channel, stream_title, duration,
+                    cfg.detect.min_duration, cfg.detect.max_duration, n_pool, client=llm_client,
+                )
+            found = [
+                h for h in found
+                if not any(h.overlaps(e, margin=5) for e in exclude)
+                and (available_until is None or h.end <= available_until)
+                and (available_from is None or h.start >= available_from)
+            ]
+            for h in found:
+                h.chat_sample = [m.text for m in chat if h.start <= m.offset <= h.end + cfg.detect.chat_delay][:40]
+            log.info("AI が音声から %d 件の場面を選びました", len(found))
+            # 重なる場面は AI が選んだ方 (区間・タイトル付き) を残す
+            candidates = found + [h for h in candidates if not any(h.overlaps(f) for f in found)]
+        except Exception as e:
+            if cfg.llm.require:
+                raise
+            log.warning("AI による音声からの場面選びに失敗したため、シグナルの候補だけを使います: %s", e)
+
     transcripts: dict[int, list[TranscriptSegment]] = {}
     if cfg.transcribe.enabled and candidates and apath:
         from .transcribe import Transcriber
@@ -191,14 +220,29 @@ def process(
     if cfg.llm.enabled and candidates:
         from .llm import model_of, provider_of, rerank_with_llm
 
-        try:
-            log.info("AI (%s) で候補を評価中 (%s)", provider_of(cfg.llm), model_of(cfg.llm))
-            candidates = rerank_with_llm(
-                candidates, cfg.llm, channel, stream_title,
-                cfg.detect.min_duration, cfg.detect.max_duration, client=llm_client,
-            )
-        except Exception as e:
-            log.warning("LLM 評価に失敗したため、シグナルのみの順位を使います: %s", e)
+        with tempfile.TemporaryDirectory() as tmp:
+            videos: dict[int, str] = {}
+            if cfg.llm.watch_video and provider_of(cfg.llm) == "gemini" and not dry_run:
+                for i, h in enumerate(candidates):
+                    log.info("AI に見せる映像を用意中 (%d/%d)", i + 1, len(candidates))
+                    try:
+                        video, offset = source.video_for(h.start, h.end)
+                        preview = Path(tmp) / f"{i}.mp4"
+                        audio_mod.preview_clip(video, h.start - offset, h.duration, str(preview))
+                        videos[i] = str(preview)
+                    except Exception as e:  # 映像が用意できない候補は文字情報だけで評価する
+                        log.warning("候補 %d の映像を用意できませんでした: %s", i + 1, e)
+            try:
+                log.info("AI (%s) で候補を評価中 (%s%s)", provider_of(cfg.llm), model_of(cfg.llm),
+                         f"、映像 {len(videos)} 本" if videos else "")
+                candidates = rerank_with_llm(
+                    candidates, cfg.llm, channel, stream_title,
+                    cfg.detect.min_duration, cfg.detect.max_duration, client=llm_client, videos=videos or None,
+                )
+            except Exception as e:
+                if cfg.llm.require:
+                    raise
+                log.warning("LLM 評価に失敗したため、シグナルのみの順位を使います: %s", e)
 
     selected = candidates[:n_target]
     # 出力ファイルは時系列順に番号を振る
@@ -216,6 +260,11 @@ def process(
         log.info("書き出し中: %s (%s〜%s) %s", out.name, _hms(h.start, ":"), _hms(h.end, ":"), h.title)
         try:
             video, offset = source.video_for(h.start, h.end)
+            # ponytail: 止まった画面の区間は飛ばすだけで次点の候補では埋めない。本数が足りなければ候補を多めに取って順に試す
+            if cfg.detect.max_frozen < 1 and (
+                    frozen := audio_mod.frozen_ratio(video, h.start - offset, h.duration)) >= cfg.detect.max_frozen:
+                log.info("画面がほとんど動いていないので飛ばします (%s, %.0f%%)", out.name, frozen * 100)
+                continue
             render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
                              max_total=cfg.detect.max_duration)
         except Exception as e:  # 1 本の失敗 (区間のダウンロード失敗など) で残りを止めない
@@ -255,6 +304,12 @@ def process(
                 log.info("投稿予定: %s  %s", e["publish_at"][:16].replace("T", " "), e["title"])
         except (ValueError, KeyError, OSError) as e:  # 設定ミスで書き出し済みの結果を失わないように
             log.warning("投稿予定表に追加できませんでした ([publish] の設定を確認してください): %s", e)
+    try:
+        from .review import write_portal
+
+        log.info("一覧ページ: %s", write_portal(cfg))
+    except (ValueError, KeyError, OSError) as e:
+        log.warning("一覧ページを作れませんでした: %s", e)
     return RunResult(selected, run_dir, score)
 
 

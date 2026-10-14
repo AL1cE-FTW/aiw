@@ -89,6 +89,11 @@ class DetectConfig:
     min_score: float = 4.5
     # 最高スコアに対してこの割合未満のピークは採用しない
     min_relative_score: float = 0.3
+    # 配信の最初・最後の秒数は使わない (待機画面の BGM・挨拶・エンディングが盛り上がりと区別しにくいため)
+    skip_start: float = 0.0
+    skip_end: float = 0.0
+    # 画面がほとんど動いていない時間がこの割合以上の区間は書き出さない (映っていない画面・ロード画面など)。1 で無効
+    max_frozen: float = 0.5
     keywords: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_KEYWORDS))
 
 
@@ -97,10 +102,15 @@ class RenderConfig:
     width: int = 1080
     height: int = 1920
     # blur: ぼかし背景+中央に元映像 / crop: 中央を9:16に切り抜き / facecam: 上に顔カメラ・下にゲーム画面
+    # stack: 上にタイトルの黒帯・中央にゲーム画面・下にカメラ
     layout: str = "blur"
     # facecam レイアウトで使う顔カメラ領域(元映像に対する比率 x, y, w, h)
     facecam: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.25, 0.25])
     facecam_height_ratio: float = 0.35
+    # facecam レイアウトのゲーム画面: 0 なら下側いっぱいに拡大。>0 なら元映像の横幅のこの割合を表示し、余白はぼかし背景
+    facecam_game_crop: float = 0.0
+    # stack レイアウト (上: タイトルの黒帯 / 中: ゲーム / 下: カメラ) の黒帯の高さ (画面の割合)
+    top_band: float = 0.24
     title: bool = True
     subtitles: bool = True
     font: str = field(default_factory=lambda: default_font())
@@ -156,6 +166,12 @@ class LLMConfig:
     # LLMに渡す候補数 = top_n * candidate_factor
     candidate_factor: int = 3
     language: str = "日本語"
+    # gemini のとき、配信の音声をまるごと聞かせて面白い場面を AI 自身にも選ばせる (チャットが少ない配信向け)
+    scan_audio: bool = True
+    # gemini のとき、候補の区間の映像も見せて評価させる (候補ごとに区間をダウンロードするので少し時間がかかる)
+    watch_video: bool = True
+    # true なら AI が使えないとき (上限・混雑など) はシグナルだけで作らずに止める (過去の配信をまとめて作り直すとき用)
+    require: bool = False
 
 
 @dataclass
@@ -200,6 +216,8 @@ class PublishConfig:
     enabled: bool = True
     post_time: str = "19:00"
     posts_per_day: int = 1
+    # 作った日から何日後の枠から使うか (0: 当日の枠から / 1: 翌日から)
+    days_ahead: int = 0
     timezone: str = "Asia/Tokyo"
     # 投稿用のハッシュタグ (AI が付けたものに足す) と、AI を使わないときの説明文
     hashtags: list[str] = field(default_factory=lambda: ["#shorts", "#Twitch切り抜き"])
