@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .config import Config
+from .fileutil import read_json
 from .models import Highlight
 
 MAX_POINTS = 600  # タイムラインに描く点の数 (長い配信は間引く)
@@ -43,22 +45,46 @@ def write_review_page(run_dir: Path, highlights: list[Highlight], score: np.ndar
         })
     data = {"channel": channel, "title": stream_title, "duration": duration,
             "score": _downsample(score), "items": items}
-    # チャットや AI の文字列に "<!--" や "</script>" があってもページが壊れないよう、< > & をエスケープする
-    payload = (json.dumps(data, ensure_ascii=False)
-               .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
-    page = TEMPLATE.replace("__TITLE__", html.escape(f"{channel or '配信'} の切り抜き候補")).replace("__DATA__", payload)
+    page = TEMPLATE.replace("__TITLE__", html.escape(f"{channel or '配信'} の切り抜き候補")).replace("__DATA__", _script_json(data))
     out = run_dir / "index.html"
     out.write_text(page, encoding="utf-8")
     return out
 
 
-TEMPLATE = """<!doctype html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__</title>
-<style>
+def _script_json(data) -> str:
+    # チャットや AI の文字列に "<!--" や "</script>" があってもページが壊れないよう、< > & をエスケープする
+    return (json.dumps(data, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+
+def write_portal(cfg: Config) -> Path:
+    """全配信のショートを 1 ページで一覧する (output/index.html)。投稿予定日と「投稿済み」チェック付き。"""
+    from .schedule import load_schedule
+
+    out = Path(cfg.output_dir)
+    when = {e["path"]: e["publish_at"] for e in load_schedule(cfg)}
+    items = []
+    for hj in sorted(out.glob("*/highlights.json")):
+        d = read_json(hj, {})
+        if not isinstance(d, dict):
+            continue
+        run = hj.parent.name
+        for h in d.get("highlights") or []:
+            if not isinstance(h, dict) or not h.get("output_path"):
+                continue
+            items.append({
+                "stream": d.get("stream_title") or run, "generated_at": d.get("generated_at", ""),
+                "video": f"{run}/{Path(h['output_path']).name}", "page": f"{run}/index.html",
+                "publish_at": when.get(h["output_path"], ""),
+                **{k: h.get(k) for k in ("title", "score", "start", "end", "description", "hashtags", "vod_url", "category", "reason")},
+            })
+    page = PORTAL.replace("__DATA__", _script_json(items))
+    path = out / "index.html"
+    path.write_text(page, encoding="utf-8")
+    return path
+
+
+STYLE = """
 :root {
   --bg: #f6f6f8; --card: #ffffff; --text: #18181b; --muted: #6b6b76; --line: #e4e4ea;
   --accent: #7c3aed; --accent-soft: #ede9fe; --mark: #f59e0b;
@@ -98,7 +124,15 @@ details { font-size: .8rem; color: var(--muted); }
 .actions a, .actions button { font-size: .8rem; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
   background: transparent; color: var(--text); text-decoration: none; cursor: pointer; }
 .empty { color: var(--muted); text-align: center; padding: 32px; }
-</style>
+"""
+
+TEMPLATE = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>""" + STYLE + """</style>
 </head>
 <body>
 <main>
@@ -182,6 +216,95 @@ function render() {
     act.appendChild(cp);
     if (it.twitch_clip) { const a = el("a", null, "Twitch クリップ"); a.href = it.twitch_clip; a.target = "_blank"; act.appendChild(a); }
     if (it.twitch_clip_edit) { const a = el("a", null, "クリップを編集"); a.href = it.twitch_clip_edit; a.target = "_blank"; act.appendChild(a); }
+    if (it.vod_url) { const a = el("a", null, "VOD で開く"); a.href = it.vod_url; a.target = "_blank"; act.appendChild(a); }
+    b.appendChild(act); c.appendChild(b); grid.appendChild(c);
+  });
+}
+render();
+</script>
+</body>
+</html>
+"""
+
+PORTAL = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ショート一覧</title>
+<style>""" + STYLE + """
+select { font: inherit; font-size: .85rem; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line);
+         background: var(--card); color: var(--text); max-width: 100%; }
+.stream { font-size: .8rem; color: var(--muted); }
+.posted { opacity: .55; }
+.check { display: flex; gap: 6px; align-items: center; font-size: .85rem; cursor: pointer; margin: 0; color: var(--text); }
+</style>
+</head>
+<body>
+<main>
+  <h1>ショート一覧</h1>
+  <p class="sub" id="sub"></p>
+  <section class="panel filters" id="filters">
+    <select id="stream" aria-label="配信"></select>
+    <select id="sort" aria-label="並び順">
+      <option value="date">投稿予定順</option><option value="score">スコア順</option>
+    </select>
+  </section>
+  <section class="grid" id="grid"></section>
+</main>
+<script>
+const ITEMS = __DATA__;
+const KEY = "twitch-shorts-posted";
+let posted = new Set();
+try { posted = new Set(JSON.parse(localStorage.getItem(KEY) || "[]")); } catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify([...posted])); } catch (e) {} };
+const fmt = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const when = iso => iso ? new Date(iso).toLocaleString("ja-JP", { month: "numeric", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" }) + " 投稿予定" : "予定なし";
+
+const streamSel = document.getElementById("stream"), sortSel = document.getElementById("sort");
+streamSel.append(new Option("すべての配信", ""));
+[...new Set(ITEMS.map(i => i.stream))].forEach(s => streamSel.append(new Option(s, s)));
+let state = "未投稿";
+const filters = document.getElementById("filters");
+["未投稿", "投稿済み", "ボツ", "すべて"].forEach(s => { const b = el("button", "chip" + (s === state ? " on" : ""), s);
+  b.onclick = () => { state = s; [...filters.querySelectorAll(".chip")].forEach(x => x.classList.toggle("on", x === b)); render(); };
+  filters.appendChild(b); });
+streamSel.onchange = sortSel.onchange = () => render();
+
+function copy(text, btn) {
+  navigator.clipboard.writeText(text).then(() => { const t = btn.textContent; btn.textContent = "コピーしました"; setTimeout(() => btn.textContent = t, 1200); });
+}
+function render() {
+  document.getElementById("sub").textContent = ITEMS.length + " 本 ・ 投稿済み " + ITEMS.filter(i => posted.has(i.video)).length + " 本";
+  const grid = document.getElementById("grid"); grid.replaceChildren();
+  const list = ITEMS.filter(i => (!streamSel.value || i.stream === streamSel.value) &&
+      (state === "すべて" || (state === "ボツ" ? i.category === "ボツ"
+        : i.category !== "ボツ" && (state === "投稿済み") === posted.has(i.video))))
+    .sort(sortSel.value === "score" ? (a, b) => b.score - a.score
+      : (a, b) => (a.publish_at || "9") < (b.publish_at || "9") ? -1 : (a.publish_at || "9") > (b.publish_at || "9") ? 1 : 0);
+  if (!list.length) { grid.appendChild(el("p", "empty", "条件に合うショートがありません")); return; }
+  list.forEach(it => {
+    const c = el("article", "card" + (posted.has(it.video) ? " posted" : ""));
+    const v = document.createElement("video"); v.src = it.video; v.controls = true; v.preload = "metadata"; c.appendChild(v);
+    const b = el("div", "body");
+    const meta = el("div", "meta");
+    if (it.category) meta.append(el("span", "badge", it.category));
+    meta.append(el("span", "badge", when(it.publish_at)), el("span", "badge", "スコア " + (it.score || 0).toFixed(1)),
+                el("span", "time", fmt(it.start) + "〜" + fmt(it.end)));
+    b.append(meta, el("div", "stream", it.stream), el("div", "title", it.title || "(タイトルなし)"));
+    if (it.reason) b.appendChild(el("div", "hook", it.reason));
+    if (it.description) b.appendChild(el("div", "desc", it.description));
+    if ((it.hashtags || []).length) b.appendChild(el("div", "tags", it.hashtags.join(" ")));
+    const chk = el("label", "check"), box = document.createElement("input"); box.type = "checkbox"; box.checked = posted.has(it.video);
+    box.onchange = () => { box.checked ? posted.add(it.video) : posted.delete(it.video); save(); render(); };
+    chk.append(box, "投稿済み"); b.appendChild(chk);
+    const act = el("div", "actions");
+    const cp = el("button", null, "タイトル+タグをコピー");
+    cp.onclick = () => copy([it.title, it.description, (it.hashtags || []).join(" ")].filter(Boolean).join("\\n"), cp);
+    act.appendChild(cp);
+    const pg = el("a", null, "この配信の候補"); pg.href = it.page; act.appendChild(pg);
     if (it.vod_url) { const a = el("a", null, "VOD で開く"); a.href = it.vod_url; a.target = "_blank"; act.appendChild(a); }
     b.appendChild(act); c.appendChild(b); grid.appendChild(c);
   });

@@ -137,3 +137,12 @@ def test_bad_publish_config_does_not_lose_results(make_stream, tmp_path, caplog)
     r = process(cfg, LocalSource(str(video)), load_chat(chat_path), tmp_path / "out" / "run")
     assert r.highlights and (tmp_path / "out" / "run" / "highlights.json").exists()
     assert "投稿予定表に追加できませんでした" in caplog.text
+
+
+def test_schedule_days_ahead_skips_today(tmp_path):
+    # days_ahead = 1 なら、今日の 19:00 枠が空いていても翌日から
+    cfg = _cfg(tmp_path)
+    cfg.publish.days_ahead = 1
+    now = datetime(2026, 10, 6, 9, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+    hs = [Highlight(start=0, end=30, peak=10, score=1, title="a", output_path="/x/a.mp4")]
+    assert add_to_schedule(cfg, hs, now=now)[0]["publish_at"][:16] == "2026-10-07T19:00"

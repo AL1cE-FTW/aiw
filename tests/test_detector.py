@@ -99,3 +99,28 @@ def test_snap_to_transcript_moves_edges_to_sentence_boundaries():
     snap_to_transcript(h, segs, cfg)
     assert h.start == 97.5
     assert h.end == 132.5
+
+
+def test_zero_weight_signals_do_not_dilute_score():
+    # チャットがほぼ無い配信で weight_chat / weight_keywords を 0 にしたら、音声だけの時と同じスコアになる
+    from twitch_shorts.detector import combine_signals
+
+    rng = np.random.default_rng(0)
+    audio = rng.normal(-30, 1, 600)
+    audio[300:305] += 15
+    cfg = DetectConfig(weight_chat=0.0, weight_keywords=0.0)
+    with_chat, _ = combine_signals({"chat": np.zeros(600), "keywords": np.zeros(600), "audio": audio}, cfg)
+    audio_only, _ = combine_signals({"audio": audio}, cfg)
+    assert np.allclose(with_chat, audio_only)
+    assert with_chat.max() > 3.0
+
+def test_skip_start_and_end_ignore_opening_and_ending():
+    # 配信の最初・最後 (待機画面の BGM・エンディング) の音量ピークは使わない
+    rng = np.random.default_rng(1)
+    audio = rng.normal(-30, 1, 1200)
+    for t in (20, 600, 1180):
+        audio[t:t + 5] += 15
+    cfg = DetectConfig(weight_chat=0.0, weight_keywords=0.0, weight_audio=1.0, min_score=3.0,
+                       skip_start=60, skip_end=60)
+    hs, _ = detect_highlights(1200, [], cfg, loudness=audio)
+    assert [round(h.peak, -2) for h in hs] == [600]

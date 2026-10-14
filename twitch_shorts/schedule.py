@@ -86,13 +86,14 @@ def _add_to_schedule(cfg: Config, highlights: list[Highlight], channel: str,
     added: list[dict] = []
     # 1 日複数本のとき、前日の枠の一部は今日の早い時間にある (例: 19:00 と翌 07:00) ので前日から探す
     day = now.date() - timedelta(days=1)
+    first_day = now.date() + timedelta(days=cfg.publish.days_ahead)
     for h in sorted(highlights, key=lambda h: h.score, reverse=True):
         if not h.output_path or h.output_path in known:
             continue
         slot = None
         while slot is None:
             for t in _slot_times(cfg, day, tz):
-                if t > now and not used[t.isoformat()]:
+                if t > now and t.date() >= first_day and not used[t.isoformat()]:
                     slot = t
                     break
             else:

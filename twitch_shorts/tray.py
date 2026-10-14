@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -277,8 +278,28 @@ def make_image(status: str):
     return img
 
 
+def _windows_browser() -> str | None:
+    """既定のブラウザ (https の関連付け) の exe。.html が VS Code などに関連付けられていても使えるように。"""
+    try:
+        import winreg
+
+        key = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            prog_id = winreg.QueryValueEx(k, "ProgId")[0]
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command") as k:
+            command = winreg.QueryValueEx(k, "")[0]
+    except OSError:
+        return None
+    m = re.match(r'\s*"([^"]+)"', command) or re.match(r"\s*(\S+)", command)
+    return m.group(1) if m else None
+
+
 def open_path(path: Path) -> None:
     if os.name == "nt":
+        browser = _windows_browser() if path.suffix.lower() in (".html", ".htm") else None
+        if browser:
+            subprocess.Popen([browser, path.resolve().as_uri()])
+            return
         os.startfile(str(path))  # noqa: S606 - 自分の出力フォルダー・ファイルを開くだけ
     elif sys.platform == "darwin":
         subprocess.Popen(["open", str(path)])

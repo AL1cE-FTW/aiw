@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 import numpy as np
@@ -28,6 +29,39 @@ def probe_video_size(path: str) -> tuple[int, int] | None:
     if not streams:
         return None
     return int(streams[0]["width"]), int(streams[0]["height"])
+
+
+def frozen_ratio(path: str, start: float, duration: float) -> float:
+    """区間のうち画面がほとんど動いていない時間の割合 (映っていない画面・ロード画面などを除くため)。"""
+    err = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", path,
+         "-vf", "freezedetect=n=-50dB:d=2", "-an", "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace",
+    ).stderr
+    starts = [float(x) for x in re.findall(r"freeze_start: ([\d.]+)", err)]
+    frozen = sum(float(x) for x in re.findall(r"freeze_duration: ([\d.]+)", err))
+    if len(starts) > len(re.findall(r"freeze_end", err)):  # 区間の最後まで止まったまま
+        frozen += duration - starts[-1]
+    return frozen / duration if duration > 0 else 0.0
+
+
+def preview_clip(path: str, start: float, duration: float, out: str) -> None:
+    """AI に見せる軽い動画 (360p・低画質) を切り出す。送る量と時間を減らすため。"""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-y", "-ss", f"{max(0.0, start):.3f}", "-t", f"{duration:.3f}",
+         "-i", path, "-vf", "scale=-2:360", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
+         "-c:a", "aac", "-b:a", "64k", "-ac", "1", out],
+        check=True, capture_output=True,
+    )
+
+
+def speech_mp3(path: str, out: str) -> None:
+    """AI に聞かせる軽い音声 (mono 32kbps の mp3) にする。拡張子が .mp4 の音声は動画扱いされて読めないため。"""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", path, "-vn", "-ac", "1", "-ar", "16000",
+         "-b:a", "32k", out],
+        check=True, capture_output=True,
+    )
 
 
 def loudness_per_second(path: str, start: float = 0.0, duration: float | None = None) -> np.ndarray:

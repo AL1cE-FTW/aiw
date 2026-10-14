@@ -27,11 +27,16 @@ def channel_url(channel: str) -> str:
     return f"https://www.twitch.tv/{channel.lower()}"
 
 
+def _finished(paths) -> list[Path]:
+    """中断したダウンロードの途中ファイル (.part / .ytdl) を除く (yt-dlp が続きから再開する)。"""
+    return sorted(p for p in paths if p.suffix not in (".part", ".ytdl"))
+
+
 def download_audio(url: str, out_dir: str | Path) -> Path:
     """VOD の音声のみをダウンロードする (Twitch の Audio_Only 形式。無ければ最低画質)。"""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(out_dir.glob("audio.*"))
+    existing = _finished(out_dir.glob("audio.*"))
     if existing:
         return existing[0]
     with _ydl({"format": "bestaudio/worst", "outtmpl": str(out_dir / "audio.%(ext)s")}) as ydl:
@@ -42,7 +47,7 @@ def download_audio(url: str, out_dir: str | Path) -> Path:
 def download_video(url: str, out_dir: str | Path, quality: str = "best") -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(out_dir.glob("video.*"))
+    existing = _finished(out_dir.glob("video.*"))
     if existing:
         return existing[0]
     with _ydl({"format": quality, "outtmpl": str(out_dir / "video.%(ext)s")}) as ydl:
@@ -67,7 +72,7 @@ def download_section(url: str, start: float, end: float, out_path: str | Path, q
     with _ydl(opts) as ydl:
         ydl.extract_info(url, download=True)
     # 区間ダウンロードでは拡張子が変わることがあるので、実際にできたファイルを探す
-    produced = [p for p in out_path.parent.glob(out_path.stem + ".*") if p.suffix not in (".part", ".ytdl")]
+    produced = _finished(out_path.parent.glob(out_path.stem + ".*"))
     if not produced:
         raise RuntimeError(f"区間のダウンロードに失敗しました: {start:.0f}-{end:.0f}s")
     if produced[0] != out_path:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from .config import LLM_PROVIDERS, LLMConfig, normalize_provider
 from .models import Highlight, normalize_hashtag
@@ -69,6 +70,13 @@ SYSTEM_PROMPT = """あなたは Twitch 配信の切り抜き編集者です。
 すべての候補について、入力と同じ id で結果を返してください。"""
 
 
+VIDEO_NOTE = """
+
+候補には、その区間の映像 (音声付き) が添付されています。チャットや文字起こしだけでなく、
+映像と音声を実際に見て聞いて評価してください。画面の動き・リアクション・ゲームの展開・
+表情なども判断材料にし、映像として見栄えのする場面を高く評価してください。"""
+
+
 def _candidate_payload(h: Highlight, idx: int) -> dict:
     return {
         "id": idx,
@@ -79,6 +87,8 @@ def _candidate_payload(h: Highlight, idx: int) -> dict:
         "signals": h.signals,
         "chat": h.chat_sample[:40],
         "transcript": h.transcript[:2000],
+        # 音声を聞いた AI が選んだ場面なら、何が起きているかのメモ
+        "ai_note": h.reason if "ai" in h.signals else "",
     }
 
 
@@ -104,8 +114,12 @@ def rerank_with_llm(
     min_duration: float,
     max_duration: float,
     client=None,
+    videos: dict[int, str] | None = None,
 ) -> list[Highlight]:
-    """候補に AI のスコアとタイトルを付けて、良い順に並べ替えて返す。"""
+    """候補に AI のスコアとタイトルを付けて、良い順に並べ替えて返す。
+
+    videos: 候補の番号 → その区間 (start〜end) を切り出した動画。Gemini のときは映像も見て評価する
+    """
     if not highlights:
         return highlights
     user_content = json.dumps(
@@ -117,9 +131,13 @@ def rerank_with_llm(
         ensure_ascii=False,
     )
     system = SYSTEM_PROMPT.format(language=cfg.language, min_dur=min_duration, max_dur=max_duration)
-    call = _call_gemini if provider_of(cfg) == "gemini" else _call_claude
-    text = call(cfg, system, user_content, client)
+    if provider_of(cfg) == "gemini":
+        text = _call_gemini(cfg, system, user_content, client, videos=videos)
+    else:
+        text = _call_claude(cfg, system, user_content, client)
     if text is None:
+        if cfg.require:
+            raise RuntimeError("AI が評価結果を返しませんでした")
         return highlights
     return _apply_results(highlights, text, min_duration, max_duration)
 
@@ -154,23 +172,63 @@ def _call_claude(cfg: LLMConfig, system: str, user_content: str, client=None) ->
     return next((b.text for b in response.content if b.type == "text"), "")
 
 
-def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None) -> str | None:
-    if client is None:
+def _gemini_client(timeout_ms: int):
+    try:
+        from google import genai
+    except ImportError as e:  # pragma: no cover - 任意依存
+        raise RuntimeError("Gemini を使うには google-genai が必要です: pip install 'twitch-shorts[gemini]'") from e
+    # GEMINI_API_KEY を読む。返事が無いときに固まらないよう時間で諦め、混雑 (429 / 503) は間を空けて 5 回まで試す
+    return genai.Client(http_options={
+        "timeout": timeout_ms,
+        "retry_options": {"attempts": 5, "initial_delay": 10, "max_delay": 120,
+                          "http_status_codes": [429, 500, 503, 504]},
+    })
+
+
+def _upload(client, path: str):
+    """Gemini にファイルを送り、使える状態 (ACTIVE) になるまで待つ。"""
+    f = client.files.upload(file=path)
+    for _ in range(120):  # 最大 10 分
+        state = getattr(f.state, "name", str(f.state))
+        if state == "ACTIVE":
+            return f
+        if state == "FAILED":
+            raise RuntimeError(f"Gemini がファイルを読み込めませんでした: {path}")
+        time.sleep(5)
+        f = client.files.get(name=f.name)
+    raise RuntimeError(f"Gemini のファイルの準備が終わりませんでした: {path}")
+
+
+def _delete(client, files) -> None:
+    for f in files:
         try:
-            from google import genai
-        except ImportError as e:  # pragma: no cover - 任意依存
-            raise RuntimeError("Gemini を使うには google-genai が必要です: pip install 'twitch-shorts[gemini]'") from e
-        client = genai.Client()  # GEMINI_API_KEY (または GOOGLE_API_KEY) を読む
-    response = client.models.generate_content(
-        model=model_of(cfg),
-        contents=user_content,
-        config={
-            "system_instruction": system,
+            client.files.delete(name=f.name)
+        except Exception:  # 消せなくても 48 時間で自動的に消える
+            pass
+
+
+def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None,
+                 videos: dict[int, str] | None = None) -> str | None:
+    client = client or _gemini_client(900_000 if videos else 300_000)
+    uploaded = []
+    try:
+        contents: str | list = user_content
+        if videos:
+            contents = [user_content]
+            for idx, path in sorted(videos.items()):
+                uploaded.append(_upload(client, path))
+                contents += [f"候補 id={idx} の映像 (映像の 0 秒 = この候補の start)", uploaded[-1]]
+        config = {
+            "system_instruction": system + (VIDEO_NOTE if videos else ""),
             "response_mime_type": "application/json",
             "response_json_schema": RESULT_SCHEMA,
             # 出力の上限はモデルごとに違うので指定しない (モデルの上限まで使う)
-        },
-    )
+        }
+        if videos:
+            config["media_resolution"] = "MEDIA_RESOLUTION_LOW"  # 映像のトークンを 1/4 に (縦型の判断には十分)
+        response = client.models.generate_content(model=model_of(cfg), contents=contents, config=config)
+    finally:
+        _delete(client, uploaded)
     candidate = (getattr(response, "candidates", None) or [None])[0]
     reason = getattr(getattr(candidate, "finish_reason", None), "name", None) or str(
         getattr(candidate, "finish_reason", "") or "")
@@ -182,6 +240,128 @@ def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None) ->
         log.warning("AI が結果を返さなかったため (%s)、シグナルのみの順位を使います", reason or "理由不明")
         return None
     return text
+
+
+SCAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "moments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "string", "description": "開始時刻 H:MM:SS"},
+                    "end": {"type": "string", "description": "終了時刻 H:MM:SS"},
+                    "score": {"type": "number", "description": "0〜10。ショート動画としての面白さ"},
+                    "title": {"type": "string"},
+                    "hook": {"type": "string"},
+                    "category": {"type": "string", "enum": CATEGORIES},
+                    "description": {"type": "string"},
+                    "hashtags": {"type": "array", "items": {"type": "string"}},
+                    "reason": {"type": "string", "description": "何が起きているか (発言・反応) を 1〜2 文で"},
+                },
+                "required": ["start", "end", "score", "title", "hook", "category", "description", "hashtags",
+                             "reason"],
+            },
+        }
+    },
+    "required": ["moments"],
+}
+
+SCAN_PROMPT = """あなたは Twitch 配信の切り抜き編集者です。
+添付は配信「{stream_title}」(チャンネル: {channel}、長さ {length}) の音声をまるごと録ったものです。
+最初から最後まで聞いて、YouTube Shorts / TikTok 向けの縦型ショート動画にすると面白い場面を
+最大 {count} 個選んでください。
+
+- 選ぶ場面: 大笑い・叫び・ツッコミ・ボケ・ハプニング・名言・スーパープレイへの興奮・オチのある会話など、
+  前後の文脈なしで単体で見ても分かって面白いもの。雑談の途中や BGM だけの部分は選ばない。
+- start / end: 音声の先頭からの時刻を H:MM:SS で。場面の前フリから始めて、オチ・反応まで含める。
+  長さは {min_dur:.0f}〜{max_dur:.0f} 秒。場面どうしは重ならないようにする。
+- score: 0〜10。面白さ・分かりやすさが高いものほど高く。
+- title: {language}で 25 文字以内。釣りすぎず、内容が伝わる切り抜きタイトル。
+- hook: 動画の最初の 3 秒に大きく表示する「引きの言葉」。{language}で 10 文字以内。オチそのものは言わない。
+- category: 面白い / スーパープレイ / ほっこり / ネタ・名場面 / その他 から選ぶ。
+- description: 投稿用の説明文。{language}で 2 文以内、ネタバレしすぎない。
+- hashtags: 投稿用ハッシュタグを 3〜5 個 (# 付き)。
+- reason: その場面で何が起きているか (発言・反応) を 1〜2 文で。"""
+
+
+def _parse_ts(value) -> float:
+    """"1:02:03" / "02:03" / 秒数 を秒にする。"""
+    if isinstance(value, (int, float)):
+        return float(value)
+    secs = 0.0
+    for part in str(value).strip().split(":"):
+        secs = secs * 60 + float(part)
+    return secs
+
+
+def _hms(t: float) -> str:
+    t = int(t)
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
+
+
+def scan_audio_with_gemini(
+    audio_path: str,
+    cfg: LLMConfig,
+    channel: str,
+    stream_title: str,
+    duration: float,
+    min_duration: float,
+    max_duration: float,
+    count: int,
+    client=None,
+) -> list[Highlight]:
+    """配信の音声をまるごと Gemini に聞かせて、面白い場面を選ばせる。
+
+    ponytail: 映像は送らない (2 時間の配信だと Gemini の入力上限を超える)。音声なら 2 時間で約 23 万トークン。
+    """
+    client = client or _gemini_client(900_000)  # 長い音声を聞くので 15 分まで待つ
+    files = []
+    try:
+        files.append(uploaded := _upload(client, audio_path))
+        prompt = SCAN_PROMPT.format(
+            stream_title=stream_title or "(不明)", channel=channel, length=_hms(duration), count=count,
+            min_dur=min_duration, max_dur=max_duration, language=cfg.language,
+        )
+        response = client.models.generate_content(
+            model=model_of(cfg),
+            contents=[uploaded, prompt],
+            config={"response_mime_type": "application/json", "response_json_schema": SCAN_SCHEMA},
+        )
+    finally:
+        _delete(client, files)
+    try:
+        moments = json.loads(response.text or "")["moments"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        log.warning("Gemini の場面選びの結果を解釈できませんでした: %s", (response.text or "")[:200])
+        return []
+
+    found: list[Highlight] = []
+    for m in moments:
+        try:
+            start, end = _parse_ts(m["start"]), _parse_ts(m["end"])
+            score = max(0.0, min(10.0, float(m.get("score", 0))))
+        except (KeyError, TypeError, ValueError):
+            continue
+        start = max(0.0, min(start, duration - min_duration))
+        end = min(duration, max(end, start + min_duration), start + max_duration)
+        if end <= start or any(start < h.end and h.start < end for h in found):
+            continue
+        tags = m.get("hashtags") or []
+        if isinstance(tags, str):
+            tags = tags.split()
+        found.append(Highlight(
+            start=round(start, 2), end=round(end, 2), peak=round((start + end) / 2, 2),
+            # ponytail: AI の 0〜10 をそのままシグナルの点数として使う (シグナルの合成スコアと大体同じ範囲)
+            score=score, signals={"ai": score},
+            title=str(m.get("title") or "").strip(), hook=str(m.get("hook") or "").strip(),
+            category=str(m.get("category") or "").strip(),
+            description=str(m.get("description") or "").strip(),
+            hashtags=[t for t in (normalize_hashtag(x) for x in tags if isinstance(x, str)) if t],
+            reason=str(m.get("reason") or "").strip(),
+        ))
+    return found
 
 
 def _apply_results(highlights: list[Highlight], text: str, min_duration: float,

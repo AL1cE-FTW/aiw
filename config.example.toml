@@ -25,6 +25,9 @@ weight_audio = 0.6      # 叫び・笑い声などの音量ピーク
 weight_clips = 1.2      # 視聴者が作ったクリップ (API 認証時のみ)
 weight_viewers = 0.5    # 同時視聴者数の増加 (watch モードで API 認証時のみ記録)
 viewer_delay = 30.0     # API の視聴者数の反映遅れ (秒)
+skip_start = 0.0         # 配信の最初の N 秒は使わない (待機画面の BGM・挨拶。例: 300 = 5 分)
+skip_end = 0.0           # 配信の最後の N 秒は使わない (エンディング)
+max_frozen = 0.5         # 画面がほとんど動かない時間がこの割合以上の区間は書き出さない (1 で無効)
 
 [detect.keywords]
 # 既定のキーワード (草, w, KEKW, Pog, クリップ など) に追加・上書き。0 で無効化。
@@ -71,6 +74,7 @@ record = true           # false: 配信中は録画せず、チャットと視�
 enabled = true
 post_time = "19:00"
 posts_per_day = 1         # 解説系以外は 1 日 1 本までが推奨
+days_ahead = 0            # 作った日から何日後の枠から使うか (1 で翌日から)
 timezone = "Asia/Tokyo"
 hashtags = ["#shorts", "#Twitch切り抜き"]   # 投稿用ハッシュタグ (AI が付けたものに足す)
 description_template = "{channel} の Twitch 配信から切り抜きました。"

@@ -150,9 +150,11 @@ def combine_signals(signals: dict[str, np.ndarray], cfg: DetectConfig) -> tuple[
         z = np.clip(z, -2.0, 6.0)
         normed[name] = z
         total += weights.get(name, 0.0) * z
-    used = sum(weights.get(k, 0.0) for k in signals) or 1.0
+    # 重み 0 のシグナル (例: チャットがほぼ無い配信で音声だけで判定) はスコアを薄めないよう数に入れない
+    active = [k for k in signals if weights.get(k, 0.0) > 0]
+    used = sum(weights[k] for k in active) or 1.0
     # シグナルの数によらず同じ閾値が使えるように、重みの合計で割って平均的なスケールに戻す
-    score = moving_average(total / used * len(signals) ** 0.5, max(1.0, cfg.smooth_seconds / 2))
+    score = moving_average(total / used * len(active) ** 0.5, max(1.0, cfg.smooth_seconds / 2))
     return score, normed
 
 
@@ -193,7 +195,10 @@ def detect_highlights(
     n = len(score)
     limit = top_n if top_n is not None else cfg.top_n
     masked = score.copy()
-    best = float(score.max()) if n else 0.0
+    masked[: int(cfg.skip_start)] = -np.inf
+    if cfg.skip_end > 0:
+        masked[max(0, n - int(cfg.skip_end)):] = -np.inf
+    best = float(masked.max()) if n else 0.0
     floor = max(cfg.min_score, best * cfg.min_relative_score)
     results: list[Highlight] = []
     while len(results) < limit:

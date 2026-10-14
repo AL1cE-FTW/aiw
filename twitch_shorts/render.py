@@ -144,7 +144,9 @@ def build_ass(cfg: RenderConfig, duration: float, title: str, segments: list[Tra
     title_chars = W * 0.88 / cfg.title_font_size
     cap_chars = min(float(cfg.caption_max_chars), W * 0.92 / cfg.subtitle_font_size)
     # テロップは中央やや上の決まった位置に、上端を揃えて固定表示する
-    pos = rf"{{\an8\pos({W // 2},{int(H * cfg.caption_position)})}}"
+    # stack レイアウトではゲーム画面を隠さないよう、下のカメラ枠の上端に出す
+    cap_y = 1 - cfg.facecam_height_ratio + 0.02 if cfg.layout == "stack" else cfg.caption_position
+    pos = rf"{{\an8\pos({W // 2},{int(H * cap_y)})}}"
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -198,12 +200,39 @@ def build_video_filter(cfg: RenderConfig, ass_name: str | None, duration: float,
         fx, fy, fw, fh = cfg.facecam
         top_h = int(H * cfg.facecam_height_ratio) // 2 * 2
         bot_h = H - top_h
+        cam = (f"[cam_src]crop=iw*{fw}:ih*{fh}:iw*{fx}:ih*{fy},"
+               f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h},setsar=1[cam]")
+        if cfg.facecam_game_crop > 0:
+            # ゲーム画面は横幅のこの割合だけ切り出して収め (拡大しすぎない)、余白はぼかし背景で埋める
+            chain = [
+                f"{src}split=3[cam_src][game_src][bg_src]", cam,
+                f"[game_src]crop=iw*{cfg.facecam_game_crop}:ih,"
+                f"scale={W}:{bot_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[game]",
+                f"[bg_src]scale={W // 4}:{bot_h // 4}:force_original_aspect_ratio=increase,crop={W // 4}:{bot_h // 4},"
+                f"boxblur=10:2,eq=brightness=-0.12,scale={W}:{bot_h},setsar=1[bg]",
+                "[bg][game]overlay=(W-w)/2:(H-h)/2[bottom]",
+                "[cam][bottom]vstack=inputs=2[base]",
+            ]
+        else:
+            chain = [
+                f"{src}split=2[cam_src][game_src]", cam,
+                f"[game_src]scale={W}:{bot_h}:force_original_aspect_ratio=increase,crop={W}:{bot_h},setsar=1[game]",
+                "[cam][game]vstack=inputs=2[base]",
+            ]
+    elif cfg.layout == "stack":
+        # 縦 3 段: 上にタイトル用の黒帯、中央にゲーム画面、下にカメラ
+        fx, fy, fw, fh = cfg.facecam
+        band_h = int(H * cfg.top_band) // 2 * 2
+        cam_h = int(H * cfg.facecam_height_ratio) // 2 * 2
+        game_h = H - band_h - cam_h
         chain = [
             f"{src}split=2[cam_src][game_src]",
+            f"color=c=black:s={W}x{band_h}:r={cfg.fps}:d={duration:.3f}[band]",
+            f"[game_src]crop=iw*{cfg.facecam_game_crop or 1}:ih,"
+            f"scale={W}:{game_h}:force_original_aspect_ratio=increase,crop={W}:{game_h},setsar=1[game]",
             f"[cam_src]crop=iw*{fw}:ih*{fh}:iw*{fx}:ih*{fy},"
-            f"scale={W}:{top_h}:force_original_aspect_ratio=increase,crop={W}:{top_h},setsar=1[cam]",
-            f"[game_src]scale={W}:{bot_h}:force_original_aspect_ratio=increase,crop={W}:{bot_h},setsar=1[game]",
-            "[cam][game]vstack=inputs=2[base]",
+            f"scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h},setsar=1[cam]",
+            "[band][game][cam]vstack=inputs=3[base]",
         ]
     elif cfg.layout == "blur":
         chain = [
@@ -214,7 +243,7 @@ def build_video_filter(cfg: RenderConfig, ass_name: str | None, duration: float,
             "[bg][fg]overlay=(W-w)/2:(H-h)/2[base]",
         ]
     else:
-        raise ValueError(f"不明なレイアウトです: {cfg.layout} (blur / crop / facecam)")
+        raise ValueError(f"不明なレイアウトです: {cfg.layout} (blur / crop / facecam / stack)")
 
     post = [f"fps={cfg.fps}"]
     if ass_name:
