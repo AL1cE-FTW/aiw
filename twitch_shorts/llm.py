@@ -209,23 +209,20 @@ def _delete(client, files) -> None:
 
 def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None,
                  videos: dict[int, str] | None = None) -> str | None:
-    client = client or _gemini_client(900_000 if videos else 300_000)
+    client = client or _gemini_client(900_000)
     uploaded = []
     try:
-        contents: str | list = user_content
-        if videos:
-            contents = [user_content]
-            for idx, path in sorted(videos.items()):
-                uploaded.append(_upload(client, path))
-                contents += [f"候補 id={idx} の映像 (映像の 0 秒 = この候補の start)", uploaded[-1]]
+        contents: list = [user_content]
+        for idx, path in sorted((videos or {}).items()):
+            uploaded.append(_upload(client, path))
+            contents += [f"候補 id={idx} の映像 (映像の 0 秒 = この候補の start)", uploaded[-1]]
         config = {
             "system_instruction": system + (VIDEO_NOTE if videos else ""),
             "response_mime_type": "application/json",
             "response_json_schema": RESULT_SCHEMA,
             # 出力の上限はモデルごとに違うので指定しない (モデルの上限まで使う)
+            "media_resolution": "MEDIA_RESOLUTION_LOW",  # 映像のトークンを 1/4 に (映像が無ければ何もしない)
         }
-        if videos:
-            config["media_resolution"] = "MEDIA_RESOLUTION_LOW"  # 映像のトークンを 1/4 に (縦型の判断には十分)
         response = client.models.generate_content(model=model_of(cfg), contents=contents, config=config)
     finally:
         _delete(client, uploaded)
@@ -287,9 +284,7 @@ SCAN_PROMPT = """あなたは Twitch 配信の切り抜き編集者です。
 
 
 def _parse_ts(value) -> float:
-    """"1:02:03" / "02:03" / 秒数 を秒にする。"""
-    if isinstance(value, (int, float)):
-        return float(value)
+    """"1:02:03" / "02:03" を秒にする。"""
     secs = 0.0
     for part in str(value).strip().split(":"):
         secs = secs * 60 + float(part)
@@ -317,9 +312,8 @@ def scan_audio_with_gemini(
     ponytail: 映像は送らない (2 時間の配信だと Gemini の入力上限を超える)。音声なら 2 時間で約 23 万トークン。
     """
     client = client or _gemini_client(900_000)  # 長い音声を聞くので 15 分まで待つ
-    files = []
+    uploaded = _upload(client, audio_path)
     try:
-        files.append(uploaded := _upload(client, audio_path))
         prompt = SCAN_PROMPT.format(
             stream_title=stream_title or "(不明)", channel=channel, length=_hms(duration), count=count,
             min_dur=min_duration, max_dur=max_duration, language=cfg.language,
@@ -330,7 +324,7 @@ def scan_audio_with_gemini(
             config={"response_mime_type": "application/json", "response_json_schema": SCAN_SCHEMA},
         )
     finally:
-        _delete(client, files)
+        _delete(client, [uploaded])
     try:
         moments = json.loads(response.text or "")["moments"]
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -348,20 +342,25 @@ def scan_audio_with_gemini(
         end = min(duration, max(end, start + min_duration), start + max_duration)
         if end <= start or any(start < h.end and h.start < end for h in found):
             continue
-        tags = m.get("hashtags") or []
-        if isinstance(tags, str):
-            tags = tags.split()
-        found.append(Highlight(
-            start=round(start, 2), end=round(end, 2), peak=round((start + end) / 2, 2),
-            # ponytail: AI の 0〜10 をそのままシグナルの点数として使う (シグナルの合成スコアと大体同じ範囲)
-            score=score, signals={"ai": score},
-            title=str(m.get("title") or "").strip(), hook=str(m.get("hook") or "").strip(),
-            category=str(m.get("category") or "").strip(),
-            description=str(m.get("description") or "").strip(),
-            hashtags=[t for t in (normalize_hashtag(x) for x in tags if isinstance(x, str)) if t],
-            reason=str(m.get("reason") or "").strip(),
-        ))
+        # ponytail: AI の 0〜10 をそのままシグナルの点数として使う (シグナルの合成スコアと大体同じ範囲)
+        h = Highlight(start=round(start, 2), end=round(end, 2), peak=round((start + end) / 2, 2),
+                      score=score, signals={"ai": score})
+        _fill(h, m)
+        found.append(h)
     return found
+
+
+def _fill(h: Highlight, r: dict) -> None:
+    """AI の結果のタイトル・引きの言葉・カテゴリ・説明文・ハッシュタグ・理由を候補に入れる。"""
+    h.title = str(r.get("title") or "").strip()
+    h.hook = str(r.get("hook") or "").strip()
+    h.category = str(r.get("category") or "").strip()
+    h.description = str(r.get("description") or "").strip()
+    tags = r.get("hashtags") or []
+    if isinstance(tags, str):  # 1 つの文字列で返ってきた場合 ("#apex #clutch")
+        tags = tags.split()
+    h.hashtags = [t for t in (normalize_hashtag(x) for x in tags if isinstance(x, str)) if t]
+    h.reason = str(r.get("reason") or "").strip()
 
 
 def _apply_results(highlights: list[Highlight], text: str, min_duration: float,
@@ -380,15 +379,7 @@ def _apply_results(highlights: list[Highlight], text: str, min_duration: float,
         if r is None:
             ranked.append((h.score / max_signal * 0.5, h))
             continue
-        h.title = str(r.get("title") or "").strip()
-        h.hook = str(r.get("hook") or "").strip()
-        h.category = str(r.get("category") or "").strip()
-        h.description = str(r.get("description") or "").strip()
-        tags = r.get("hashtags") or []
-        if isinstance(tags, str):  # 1 つの文字列で返ってきた場合 ("#apex #clutch")
-            tags = tags.split()
-        h.hashtags = [t for t in (normalize_hashtag(x) for x in tags if isinstance(x, str)) if t]
-        h.reason = str(r.get("reason") or "").strip()
+        _fill(h, r)
         start, end = float(r.get("start", h.start)), float(r.get("end", h.end))
         # LLM の提案は元の候補区間の内側かつ長さ制約を満たす場合だけ採用する
         if h.start - 1 <= start < end <= h.end + 1 and min_duration <= end - start <= max_duration:

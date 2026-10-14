@@ -244,11 +244,10 @@ def set_startup(enabled: bool, channel: str, config_paths: list[str] | None = No
 
 def _setup_logging(path: Path) -> None:
     """pythonw で起動したときは画面に何も出ないので、ログをファイルに残す。"""
-    if sys.stderr is not None:
-        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        logging.basicConfig(filename=str(path), level=logging.INFO, encoding="utf-8",
+        # force: 起動時 (cli) の設定があるとファイルに書かれないため上書きする
+        logging.basicConfig(filename=str(path), level=logging.INFO, encoding="utf-8", force=True,
                             format="%(asctime)s %(levelname)s %(message)s")
     except OSError:
         pass
@@ -399,13 +398,23 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         else:
             open_path((Path(work_dir) / "logs").resolve())
 
+    def close(icon) -> None:
+        log.info("アイコンを閉じます")
+        icon.stop()
+        # ponytail: 実機で終了を押してもメッセージループが終わらず残ることがあった (テストでは再現せず原因不明)。
+        # auto はもう止まっているので、5 秒で閉じなければプロセスごと終える
+        timer = threading.Timer(5, os._exit, args=(0,))
+        timer.daemon = True
+        timer.start()
+
     def quit_app(icon, item) -> None:
+        log.info("終了が押されました")
         quitting.set()  # 自動処理の ON / OFF はそのまま (次に起動したときも同じ状態で始まる)
         if ctl.running():
             ctl.stop()  # 処理の途中なら、終わってからアイコンを閉じる (監視のスレッドが閉じる)
         refresh(icon)
         if not ctl.running():
-            icon.stop()
+            close(icon)
 
     @in_background
     def kill_now(icon) -> None:
@@ -444,7 +453,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
                     refresh(icon)
                 first = False
                 if quitting.is_set() and not ctl.running():
-                    icon.stop()
+                    close(icon)
                     return
             except Exception:  # 1 回の失敗で監視をやめない
                 log.exception("auto の様子を確認できませんでした")
