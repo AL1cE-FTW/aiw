@@ -67,3 +67,19 @@ def test_portal_lists_every_run_with_publish_date(tmp_path):
     assert [(i["stream"], i["video"], i["publish_at"][:10]) for i in items] == [
         ("配信A", "a_1/s.mp4", "2026-10-06"), ("b_2", "b_2/s.mp4", "")]
     assert "</script>\"" not in page
+
+def test_portal_finds_auto_runs_under_channel_folder(tmp_path):
+    from twitch_shorts.review import write_portal
+
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    for run in ("yuuki_ftw/20261013_200000", "yuuki_ftw/20261013_200000/live/rec_000"):
+        d = tmp_path / "out" / run
+        d.mkdir(parents=True)
+        h = Highlight(start=0, end=30, peak=10, score=5, title="t", output_path=str(d / "s.mp4"))
+        (d / "highlights.json").write_text(json.dumps({"stream_title": "配信", "highlights": [h.to_dict()]}),
+                                           encoding="utf-8")
+    page = write_portal(cfg).read_text(encoding="utf-8")
+    items = json.loads(re.search(r"const ITEMS = (.*);\n", page).group(1))
+    # auto の書き出し先 (チャンネル名/日時) も載せ、配信中のプレビューは載せない
+    assert [i["video"] for i in items] == ["yuuki_ftw/20261013_200000/s.mp4"]
+    assert items[0]["page"] == "yuuki_ftw/20261013_200000/index.html"

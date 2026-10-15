@@ -64,11 +64,15 @@ def write_portal(cfg: Config) -> Path:
     out = Path(cfg.output_dir)
     when = {e["path"]: e["publish_at"] for e in load_schedule(cfg)}
     items = []
-    for hj in sorted(out.glob("*/highlights.json")):
+    # auto は output/<チャンネル>/<日時>/ に、process などは output/<名前>/ に書き出す
+    for hj in sorted(out.rglob("highlights.json")):
+        rel = hj.parent.relative_to(out)
+        if "live" in rel.parts[1:]:  # 配信中のプレビュー (正式版は配信後に別に作られる)
+            continue
         d = read_json(hj, {})
         if not isinstance(d, dict):
             continue
-        run = hj.parent.name
+        run = rel.as_posix()
         for h in d.get("highlights") or []:
             if not isinstance(h, dict) or not h.get("output_path"):
                 continue

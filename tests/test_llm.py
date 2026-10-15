@@ -205,6 +205,8 @@ def test_gemini_scan_audio_picks_moments(monkeypatch):
         {"start": "1:59:55", "end": "2:05:00", "score": 7, "title": "最後", "hook": "", "category": "その他",
          "description": "", "hashtags": [], "reason": ""},  # 終わりを超える → 配信の長さに収める
         {"start": "x", "end": "y", "score": 1},  # 読めない → 捨てる
+        {"start": "2:30:00", "end": "2:30:30", "score": 10, "title": "配信の外", "hook": "", "category": "その他",
+         "description": "", "hashtags": [], "reason": ""},  # 配信より後 → 端に寄せずに捨てる
     ]})
     client = FakeGeminiFiles(text)
     found = llm.scan_audio_with_gemini("a.mp4", LLMConfig(provider="gemini"), "c", "s", 7200, 15, 59, 9,
@@ -232,6 +234,37 @@ def test_gemini_rerank_watches_candidate_videos(monkeypatch):
     # 文字情報 → 候補 1 の説明 → その映像 の順に送り、送った映像は消す
     assert client.contents[1] == "候補 id=1 の映像 (映像の 0 秒 = この候補の start)"
     assert client.contents[2].state.name == "ACTIVE" and client.deleted == "files/1"
+
+
+def test_gemini_rerank_uploads_all_videos_before_waiting(monkeypatch):
+    from twitch_shorts import llm
+
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    events = []
+
+    class Files:
+        def upload(self, file):
+            events.append(("upload", file))
+            return SimpleNamespace(name=file, state=SimpleNamespace(name="PROCESSING"))
+
+        def get(self, name):
+            events.append(("get", name))
+            return SimpleNamespace(name=name, state=SimpleNamespace(name="ACTIVE"))
+
+        def delete(self, name):
+            events.append(("delete", name))
+
+    class Models:
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(text=json.dumps({"candidates": []}))
+
+    client = SimpleNamespace(files=Files(), models=Models())
+    cands = [Highlight(start=10, end=40, peak=20, score=5.0), Highlight(start=100, end=130, peak=110, score=4.0)]
+    rerank_with_llm(cands, LLMConfig(provider="gemini"), "c", "", 15, 59, client=client,
+                    videos={0: "v0.mp4", 1: "v1.mp4"})
+    # 1 本ずつ準備を待たずに、先に全部送ってから待つ
+    assert events[:4] == [("upload", "v0.mp4"), ("upload", "v1.mp4"), ("get", "v0.mp4"), ("get", "v1.mp4")]
+    assert {e for e in events if e[0] == "delete"} == {("delete", "v0.mp4"), ("delete", "v1.mp4")}
 
 
 def test_require_stops_instead_of_signal_only():

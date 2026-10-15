@@ -126,3 +126,63 @@ def test_download_audio_ignores_partial_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl, "_ydl", lambda opts: FakeYDL())
     assert dl.download_audio("url", tmp_path).name == "audio.mp4"
+
+def test_frozen_scene_is_replaced_by_next_candidate(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import audio as audio_mod
+
+    video, chat_path = make_stream(duration=150, events=(40, 110))
+    cfg = _cfg(tmp_path)
+    cfg.detect.top_n = 1
+    real = audio_mod.frozen_ratio
+    # 一番の候補 (40 秒付近) は画面が止まっている扱い
+    monkeypatch.setattr(audio_mod, "frozen_ratio",
+                        lambda path, start, dur: 1.0 if start < 80 else real(path, start, dur))
+    r = process(cfg, LocalSource(str(video)), load_chat(chat_path), tmp_path / "f")
+    [h] = r.highlights
+    assert h.start > 80 and h.output_path
+
+
+def test_audio_scan_respects_skip_and_preview(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import llm
+
+    video, chat_path = make_stream(duration=150, events=(110,))
+    cfg = _cfg(tmp_path)
+    cfg.llm.enabled, cfg.llm.provider, cfg.llm.watch_video = True, "gemini", False
+    cfg.detect.skip_start = 30
+    calls = []
+
+    def fake_scan(*a, **k):
+        calls.append(1)
+        return [Highlight(start=5, end=25, peak=10, score=10, title="開始直後", signals={"ai": 10})]
+
+    def fail_rerank(*a, **k):
+        raise RuntimeError("混雑")
+
+    monkeypatch.setattr(llm, "scan_audio_with_gemini", fake_scan)
+    monkeypatch.setattr(llm, "rerank_with_llm", fail_rerank)
+    monkeypatch.setattr("twitch_shorts.audio.speech_mp3", lambda src, dst: None)
+    chat = load_chat(chat_path)
+    r = process(cfg, LocalSource(str(video)), chat, tmp_path / "s", dry_run=True)
+    # skip_start より前の場面は AI が選んでも使わない
+    assert calls and all(h.start >= 30 for h in r.highlights) and r.highlights
+    # 配信中のプレビューでは音声をまるごと聞かせない
+    calls.clear()
+    process(cfg, LocalSource(str(video)), chat, tmp_path / "p", dry_run=True, publish=False)
+    assert calls == []
+
+
+def test_ai_scan_and_signal_candidates_are_ordered_by_score(make_stream, tmp_path, monkeypatch):
+    from twitch_shorts import llm
+
+    video, chat_path = make_stream(duration=150, events=(40,))
+    cfg = _cfg(tmp_path)
+    cfg.llm.enabled, cfg.llm.provider, cfg.llm.watch_video = True, "gemini", False
+    cfg.detect.top_n = 1
+    monkeypatch.setattr(llm, "scan_audio_with_gemini", lambda *a, **k: [
+        Highlight(start=100, end=120, peak=110, score=0.01, title="微妙", signals={"ai": 0.01})])
+    monkeypatch.setattr(llm, "rerank_with_llm", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("混雑")))
+    monkeypatch.setattr("twitch_shorts.audio.speech_mp3", lambda src, dst: None)
+    r = process(cfg, LocalSource(str(video)), load_chat(chat_path), tmp_path / "o", dry_run=True)
+    # AI の評価に失敗しても、点数の低い AI の場面が先頭に来て選ばれることはない
+    [h] = r.highlights
+    assert h.title != "微妙" and h.start < 60

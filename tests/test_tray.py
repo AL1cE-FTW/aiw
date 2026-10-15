@@ -203,10 +203,26 @@ def test_run_tray_menu_with_fake_pystray(tmp_path, monkeypatch):
             super().__init__(*a, popen=popen, **k)
 
     monkeypatch.setattr(tray, "AutoController", Ctl)
+    timers = []
+
+    class Timer:  # 5 秒後に os._exit する保険のタイマー。本物だとテストのプロセスごと終わる
+        def __init__(self, interval, fn, args=()):
+            self.daemon, self.started, self.cancelled = False, False, False
+            timers.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+    monkeypatch.setattr(threading, "Timer", Timer)
     work = tmp_path / "work"
     work.mkdir()
     assert tray.run_tray("yuuki_ftw", str(work), str(tmp_path / "out")) == 0
     assert fake.last.stopped and len(procs) == 1  # OFF にしたので起動し直さない
+    # アイコンが普通に閉じたら、強制終了のタイマーは止める (後片付けを途中で切らない)
+    assert timers and all(t.started and t.cancelled for t in timers)
     assert '"auto": false' in (work / "tray.json").read_text()
 
 
@@ -251,3 +267,26 @@ def test_does_not_start_when_another_auto_holds_the_lock(tmp_path):
         holder.kill()
     with file_lock(tmp_path / "work" / "auto", timeout=5):
         pass
+
+
+def test_log_file_keeps_console_output(tmp_path):
+    import logging
+
+    root = logging.getLogger()
+    saved = (root.handlers[:], root.level)
+    console = logging.StreamHandler()
+    root.handlers[:] = [console]
+    try:
+        tray._setup_logging(tmp_path / "logs" / "tray.log")
+        tray._setup_logging(tmp_path / "logs" / "tray.log")  # 2 回呼んでも同じファイルに二重に書かない
+        assert console in root.handlers
+        files = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+        assert len(files) == 1
+        logging.getLogger("twitch_shorts").info("こんにちは")
+        files[0].flush()
+        assert "こんにちは" in (tmp_path / "logs" / "tray.log").read_text(encoding="utf-8")
+    finally:
+        for h in root.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.close()
+        root.handlers[:], root.level = saved
