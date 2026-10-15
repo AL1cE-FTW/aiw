@@ -244,13 +244,22 @@ def set_startup(enabled: bool, channel: str, config_paths: list[str] | None = No
 
 def _setup_logging(path: Path) -> None:
     """pythonw で起動したときは画面に何も出ないので、ログをファイルに残す。"""
+    root = logging.getLogger()
+    if any(isinstance(h, logging.FileHandler) and h.baseFilename == str(path.resolve()) for h in root.handlers):
+        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # force: 起動時 (cli) の設定があるとファイルに書かれないため上書きする
-        logging.basicConfig(filename=str(path), level=logging.INFO, encoding="utf-8", force=True,
-                            format="%(asctime)s %(levelname)s %(message)s")
+        handler = logging.FileHandler(path, encoding="utf-8")
     except OSError:
-        pass
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    # 起動時 (cli) の画面への出力は残したまま、ファイルにも書く (pythonw では画面が無いので画面への出力は外す)
+    for h in list(root.handlers):
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) and h.stream is None:
+            root.removeHandler(h)
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
 
 
 def _alert(message: str) -> None:
@@ -398,13 +407,17 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         else:
             open_path((Path(work_dir) / "logs").resolve())
 
+    exit_timers: list[threading.Timer] = []
+
     def close(icon) -> None:
         log.info("アイコンを閉じます")
         icon.stop()
         # ponytail: 実機で終了を押してもメッセージループが終わらず残ることがあった (テストでは再現せず原因不明)。
         # auto はもう止まっているので、5 秒で閉じなければプロセスごと終える
+        # アイコンが普通に閉じたら止める (後片付けの途中で終わらせない)
         timer = threading.Timer(5, os._exit, args=(0,))
         timer.daemon = True
+        exit_timers.append(timer)
         timer.start()
 
     def quit_app(icon, item) -> None:
@@ -461,6 +474,8 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
     try:
         icon.run(setup=watch_child)
     finally:
+        for t in exit_timers:
+            t.cancel()
         ctl.stop()
         single.__exit__(None, None, None)
     return 0

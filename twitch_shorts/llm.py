@@ -187,7 +187,10 @@ def _gemini_client(timeout_ms: int):
 
 def _upload(client, path: str):
     """Gemini にファイルを送り、使える状態 (ACTIVE) になるまで待つ。"""
-    f = client.files.upload(file=path)
+    return _wait_active(client, client.files.upload(file=path), path)
+
+
+def _wait_active(client, f, path: str):
     for _ in range(120):  # 最大 10 分
         state = getattr(f.state, "name", str(f.state))
         if state == "ACTIVE":
@@ -213,9 +216,13 @@ def _call_gemini(cfg: LLMConfig, system: str, user_content: str, client=None,
     uploaded = []
     try:
         contents: list = [user_content]
-        for idx, path in sorted((videos or {}).items()):
-            uploaded.append(_upload(client, path))
-            contents += [f"候補 id={idx} の映像 (映像の 0 秒 = この候補の start)", uploaded[-1]]
+        items = sorted((videos or {}).items())
+        # 先に全部送ってから待つ (1 本ずつ準備を待つと、候補の数だけ待ち時間が積み重なる)
+        for _, path in items:
+            uploaded.append(client.files.upload(file=path))
+        uploaded[:] = [_wait_active(client, f, path) for f, (_, path) in zip(uploaded, items)]
+        for f, (idx, _) in zip(uploaded, items):
+            contents += [f"候補 id={idx} の映像 (映像の 0 秒 = この候補の start)", f]
         config = {
             "system_instruction": system + (VIDEO_NOTE if videos else ""),
             "response_mime_type": "application/json",
@@ -338,8 +345,12 @@ def scan_audio_with_gemini(
             score = max(0.0, min(10.0, float(m.get("score", 0))))
         except (KeyError, TypeError, ValueError):
             continue
-        start = max(0.0, min(start, duration - min_duration))
+        # 配信の外から始まる場面は AI の聞き間違いなので、端に寄せずに捨てる (終わりだけはみ出すなら収める)
+        if start < 0 or start >= duration - 1:
+            continue
         end = min(duration, max(end, start + min_duration), start + max_duration)
+        if end - start < min_duration:
+            start = max(0.0, end - min_duration)
         if end <= start or any(start < h.end and h.start < end for h in found):
             continue
         # ponytail: AI の 0〜10 をそのままシグナルの点数として使う (シグナルの合成スコアと大体同じ範囲)

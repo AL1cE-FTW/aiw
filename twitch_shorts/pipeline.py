@@ -163,7 +163,9 @@ def process(
     if cfg.web.url and not cfg.web.upload_token and clip_vod and publish and not dry_run:
         log.warning("[web] url はありますが upload_token が無いため、切り抜き候補ページには送りません")
     n_extra = WEB_EXTRA_CANDIDATES if want_web else 0
-    n_candidates = n_pool + n_extra + len(exclude) * 2
+    # 画面が止まっている場面を飛ばしたときに埋める予備の候補
+    n_spare = n_target if cfg.detect.max_frozen < 1 and not dry_run else 0
+    n_candidates = n_pool + n_spare + n_extra + len(exclude) * 2
     candidates, score = detect_highlights(
         duration, chat, cfg.detect, loudness, clips, top_n=n_candidates, viewers=viewers
     )
@@ -173,11 +175,15 @@ def process(
         and (available_until is None or h.end <= available_until)
         and (available_from is None or h.start >= available_from)
     ]
-    extras = candidates[n_pool:n_pool + n_extra]  # ショートの対象外。一覧ページにだけ載せる
+    spares = candidates[n_pool:n_pool + n_spare]
+    extras = candidates[n_pool + n_spare:n_pool + n_spare + n_extra]  # ショートの対象外。一覧ページにだけ載せる
     candidates = candidates[:n_pool]
     log.info("候補 %d 件を検出", len(candidates))
 
-    if cfg.llm.enabled and cfg.llm.scan_audio and cfg.llm.provider == "gemini" and apath:
+    from .llm import provider_of
+
+    # 配信中のプレビュー (publish=False) では、配信の音声をまるごと聞かせる処理は重いので配信後の正式版だけで行う
+    if cfg.llm.enabled and cfg.llm.scan_audio and provider_of(cfg.llm) == "gemini" and apath and publish:
         from .llm import model_of, scan_audio_with_gemini
 
         try:
@@ -194,31 +200,43 @@ def process(
                 if not any(h.overlaps(e, margin=5) for e in exclude)
                 and (available_until is None or h.end <= available_until)
                 and (available_from is None or h.start >= available_from)
+                and h.start >= cfg.detect.skip_start
+                and (cfg.detect.skip_end <= 0 or h.end <= duration - cfg.detect.skip_end)
             ]
             for h in found:
                 h.chat_sample = [m.text for m in chat if h.start <= m.offset <= h.end + cfg.detect.chat_delay][:40]
             log.info("AI が音声から %d 件の場面を選びました", len(found))
             # 重なる場面は AI が選んだ方 (区間・タイトル付き) を残す
-            candidates = found + [h for h in candidates if not any(h.overlaps(f) for f in found)]
+            # AI の点数 (0〜10) とシグナルの点数は大体同じ範囲なので、まとめて点数順に並べる
+            # (後の AI の評価が失敗したときも、良い候補から選ばれるように)
+            candidates = sorted(found + [h for h in candidates if not any(h.overlaps(f) for f in found)],
+                                key=lambda h: h.score, reverse=True)
         except Exception as e:
             if cfg.llm.require:
                 raise
             log.warning("AI による音声からの場面選びに失敗したため、シグナルの候補だけを使います: %s", e)
 
     transcripts: dict[int, list[TranscriptSegment]] = {}
-    if cfg.transcribe.enabled and candidates and apath:
-        from .transcribe import Transcriber
+    transcriber = None
 
-        tr = Transcriber(cfg.transcribe)
+    def transcribe(h: Highlight) -> None:
+        nonlocal transcriber
+        if transcriber is None:
+            from .transcribe import Transcriber
+
+            transcriber = Transcriber(cfg.transcribe)
+        segs = transcriber.transcribe_range(apath, max(0.0, h.start - 5), h.end + 5)
+        transcripts[id(h)] = segs
+        snap_to_transcript(h, segs, cfg.detect)
+        h.transcript = " ".join(s.text for s in segs if s.end > h.start and s.start < h.end)
+
+    if cfg.transcribe.enabled and candidates and apath:
         for i, h in enumerate(candidates):
             log.info("文字起こし中 (%d/%d)", i + 1, len(candidates))
-            segs = tr.transcribe_range(apath, max(0.0, h.start - 5), h.end + 5)
-            transcripts[id(h)] = segs
-            snap_to_transcript(h, segs, cfg.detect)
-            h.transcript = " ".join(s.text for s in segs if s.end > h.start and s.start < h.end)
+            transcribe(h)
 
     if cfg.llm.enabled and candidates:
-        from .llm import model_of, provider_of, rerank_with_llm
+        from .llm import model_of, rerank_with_llm
 
         with tempfile.TemporaryDirectory() as tmp:
             videos: dict[int, str] = {}
@@ -244,7 +262,38 @@ def process(
                     raise
                 log.warning("LLM 評価に失敗したため、シグナルのみの順位を使います: %s", e)
 
-    selected = candidates[:n_target]
+    frozen_ids: set[int] = set()
+    videos_of: dict[int, tuple[str, float]] = {}  # 調べるときに用意した動画を書き出しでも使う
+    if dry_run or cfg.detect.max_frozen >= 1:
+        selected = candidates[:n_target]
+    else:
+        # 画面がほとんど動いていない場面 (映っていない画面・ロード画面など) は飛ばし、次点の候補で埋める
+        selected = []
+        for h in candidates + spares:
+            if len(selected) >= n_target:
+                break
+            if any(h.overlaps(s) for s in selected):
+                continue
+            try:
+                video, offset = videos_of[id(h)] = source.video_for(h.start, h.end)
+                frozen = audio_mod.frozen_ratio(video, h.start - offset, h.duration)
+            except Exception as e:  # 調べられない場面は書き出しを試す (失敗すれば書き出しの所で飛ばす)
+                log.warning("画面が動いているか調べられませんでした (%s〜): %s", _hms(h.start, ":"), e)
+                frozen = 0.0
+            if frozen >= cfg.detect.max_frozen:
+                log.info("画面がほとんど動いていないので次点の候補にします (%s〜%s, %.0f%%)",
+                         _hms(h.start, ":"), _hms(h.end, ":"), frozen * 100)
+                frozen_ids.add(id(h))
+                continue
+            if cfg.transcribe.enabled and apath and id(h) not in transcripts:  # 予備の候補はここで文字起こしする
+                try:
+                    bounds = (h.start, h.end)
+                    transcribe(h)
+                    if (h.start, h.end) != bounds:  # 区間が変わったら、書き出しのときに動画を用意し直す
+                        videos_of.pop(id(h), None)
+                except Exception as e:
+                    log.warning("文字起こしに失敗しました (字幕なしで書き出します): %s", e)
+            selected.append(h)
     # 出力ファイルは時系列順に番号を振る
     selected.sort(key=lambda h: h.start)
     start_index = len(exclude) + 1
@@ -259,12 +308,7 @@ def process(
         out = run_dir / f"short_{i:02d}_{_hms(h.start)}.mp4"
         log.info("書き出し中: %s (%s〜%s) %s", out.name, _hms(h.start, ":"), _hms(h.end, ":"), h.title)
         try:
-            video, offset = source.video_for(h.start, h.end)
-            # ponytail: 止まった画面の区間は飛ばすだけで次点の候補では埋めない。本数が足りなければ候補を多めに取って順に試す
-            if cfg.detect.max_frozen < 1 and (
-                    frozen := audio_mod.frozen_ratio(video, h.start - offset, h.duration)) >= cfg.detect.max_frozen:
-                log.info("画面がほとんど動いていないので飛ばします (%s, %.0f%%)", out.name, frozen * 100)
-                continue
+            video, offset = videos_of.get(id(h)) or source.video_for(h.start, h.end)
             render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
                              max_total=cfg.detect.max_duration)
         except Exception as e:  # 1 本の失敗 (区間のダウンロード失敗など) で残りを止めない
@@ -282,8 +326,8 @@ def process(
         # 配信後の一覧ページ (worker/) に、ショートにした場面と次点の候補を送る
         from .web_upload import build_payload, run_id_for, upload_run
 
-        chosen = {id(h) for h in selected}
-        listed = selected + [h for h in candidates + extras if id(h) not in chosen]
+        chosen = {id(h) for h in selected} | frozen_ids
+        listed = selected + [h for h in candidates + spares + extras if id(h) not in chosen]
         for h in listed:
             if not h.title:
                 h.title = f"{_hms(h.start, ':')} の場面"
