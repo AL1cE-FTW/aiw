@@ -94,6 +94,11 @@ class DetectConfig:
     skip_end: float = 0.0
     # 画面がほとんど動いていない時間がこの割合以上の区間は書き出さない (映っていない画面・ロード画面など)。1 で無効
     max_frozen: float = 0.5
+    # 配信者が付けたストリームマーカー (Twitch) の場面を必ず候補に入れる (要 twitch-shorts login)
+    use_markers: bool = True
+    # マーカーは出来事の少し後に打たれるので、マーカーの前を多めに取る (秒)
+    marker_before: float = 40.0
+    marker_after: float = 10.0
     keywords: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_KEYWORDS))
 
 
@@ -133,6 +138,25 @@ class RenderConfig:
     fps: int = 30
     loudnorm: bool = True
     fade: float = 0.3
+    # 字幕の文字色と縁取りの色 (#RRGGBB)
+    subtitle_color: str = "#FFFFFF"
+    subtitle_outline_color: str = "#000000"
+    # 無音カット: 話していない間 (silence_min 秒以上) を詰めてテンポを上げる
+    silence_cut: bool = False
+    silence_db: float = -35.0
+    silence_min: float = 0.8
+    # 切った前後に残す余白 (秒)。言葉の頭やお尻が切れないように
+    silence_pad: float = 0.15
+    # コメント字幕: 視聴者のチャットをアイコン付きの吹き出しで画面に流す
+    comments: bool = False
+    comment_font_size: int = 44
+    comment_seconds: float = 3.0
+    comment_max_chars: int = 16
+    # 1 度に出すコメントの段数と、一番上の段の位置 (画面上端からの割合)
+    comment_lines: int = 3
+    comment_position: float = 0.56
+    # 字幕を .srt でも書き出す (YouTube の字幕や DaVinci Resolve などで編集し直すとき用)
+    export_srt: bool = False
 
 
 @dataclass
@@ -278,6 +302,13 @@ def load_config(path: str | os.PathLike | list | None = None) -> Config:
     cfg.twitch.irc_oauth_token = os.environ.get("TWITCH_IRC_TOKEN", cfg.twitch.irc_oauth_token)
     cfg.web.upload_token = os.environ.get("AIW_UPLOAD_TOKEN", cfg.web.upload_token)
     cfg.detect.keywords = {k.lower(): v for k, v in cfg.detect.keywords.items()}
+    from .render import ass_color
+
+    for key in ("subtitle_color", "subtitle_outline_color"):
+        try:  # 書き間違いは読み込んだ時点で知らせる
+            ass_color(getattr(cfg.render, key))
+        except ValueError as e:
+            raise ValueError(f"[render] {key}: {e}") from None
     # AI を使う設定なのに provider を書き間違えていたら、気付かないまま AI 無しで動き続けないよう読み込んだ時点で止める
     try:
         cfg.llm.provider = normalize_provider(cfg.llm.provider)

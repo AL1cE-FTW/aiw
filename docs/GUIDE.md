@@ -116,6 +116,8 @@ twitch-shorts login
 
 表示された URL をブラウザで開き、コードを確認して **配信者のアカウントで「許可」** します。
 ログイン情報は `work/twitch_user_token.json` に保存され、以後は自動で更新されます。
+ログインすると、配信中に付けた **ストリームマーカー** の場面も必ずショートにします
+(以前にログインした人は、マーカーを使うためにもう一度 `twitch-shorts login` してください)。
 
 ### 2-5. 準備できたか確認する
 
@@ -301,6 +303,8 @@ VOD が無い場合はクリップを作れないので送りません。ペー�
 | どこが検出されるかだけ見る | 上のコマンドに `--dry-run` |
 | VOD のチャットだけ保存 | `twitch-shorts chat https://www.twitch.tv/videos/1234567890` |
 | Twitch クリップも作る | `vod` / `latest` に `--twitch-clips` (要ログイン。自分のチャンネルのみ) |
+| 時刻を指定して作る | `twitch-shorts vod <URL> --range 1:23:00-1:23:40` (複数指定できる。`local` でも使える) |
+| 無音カット・コメント字幕を付ける | 上のコマンドに `--silence-cut` / `--comments` |
 
 よく使うオプション: `-n 3` (本数)、`--layout facecam` (レイアウト)、`--transcribe` (字幕)、`--llm` (AI)。
 
@@ -355,6 +359,17 @@ setx ANTHROPIC_API_KEY "ここにキー"   # Anthropic Console で作成
 
 どちらも `config.toml` を変えずに試すなら、コマンドに `--llm` を付けます。
 
+### テンポ・コメント・マーカー
+
+- **無音カット** (`[render] silence_cut = true` / `--silence-cut`): 話していない間 (0.8 秒以上) を詰めます。
+  字幕とコメントの時刻もカット後に合わせます
+- **コメント字幕** (`[render] comments = true` / `--comments`): その場面のチャットを、名前の頭文字のアイコンと
+  半透明の吹き出しで画面の中央左寄せに流します (最大 3 段)。`!` で始まるコマンドと URL は出しません
+- **ストリームマーカー** (`[detect] use_markers`、既定でオン): 配信中に `/marker` やダッシュボードで付けた
+  マーカーの場面 (マーカーの 40 秒前〜10 秒後) を、検出の結果より優先して作ります。要ログイン
+- **字幕の SRT 書き出し** (`[render] export_srt = true`): ショートと同じ名前の `.srt` を書き出します
+- **字幕の色** (`[render] subtitle_color` / `subtitle_outline_color`): `#RRGGBB` で指定
+
 ### レイアウト
 
 `config.toml` の `[render] layout`:
@@ -406,6 +421,9 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_20261008/config.tuned.
 | `[detect.keywords]` | — | 盛り上がりワードの追加 (例: `"yuukiPog" = 1.5`) |
 | `[render] layout` | blur | blur / crop / facecam |
 | `[render] hook_seconds` | 2.0 | 冒頭に見どころを先見せする秒数 (0 で無効) |
+| `[render] silence_cut` | false | 話していない間を詰める |
+| `[render] comments` | false | チャットを吹き出しで画面に出す |
+| `[detect] use_markers` | true | ストリームマーカーの場面を必ず作る (要ログイン) |
 | `[render] font` | OS に合わせて自動 | 字幕のフォント |
 | `[publish] post_time` | 19:00 | 投稿予定の時刻 |
 | `[clips] max_per_stream` | 5 | 1 配信で作る Twitch クリップの最大数 |
@@ -433,6 +451,9 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_20261008/config.tuned.
 - Twitch API: [Create Clip From VOD / Get Clips / Get Streams / Get Videos](https://dev.twitch.tv/docs/api/reference/)、
   [Clip API の改善と Clip From VOD の公開 (Twitch Developer Forums)](https://discuss.dev.twitch.com/t/introducing-clip-api-improvements-and-clip-from-vod-in-open-beta/64492)、
   [ログイン (Device Code Grant Flow)](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/)
+- 無音カット・コメント字幕・ストリームマーカー・区間の指定・SRT 書き出し: [Stretheus のリリースノート](https://github.com/evolutysystems/autoedit/releases)
+  (v1.4.0〜v1.4.7 の機能を、このツールの自動処理に合わせて作り直したもの。コードは使っていない)、
+  Twitch API [Get Stream Markers](https://dev.twitch.tv/docs/api/markers/)
 - ショートの作り方: タルレミ・エラ「[OW動画投稿講座](https://note.com/tallemi_ella/n/na6e518039897)」
   (冒頭 3 秒・テロップ位置の固定・毎日同じ時間に投稿・見るべき指標)
 - 確認ページ・カテゴリ分け: [KumoMoments](https://kumotools.com/kumomoments) (Kumomo Rin) の

@@ -42,6 +42,35 @@ def _common_overrides(cfg: Config, args: argparse.Namespace) -> None:
         cfg.render.subtitles = False
     if getattr(args, "twitch_clips", False):
         cfg.clips.enabled = True
+    if getattr(args, "silence_cut", False):
+        cfg.render.silence_cut = True
+    if getattr(args, "comments", False):
+        cfg.render.comments = True
+
+
+def parse_time(text: str) -> float:
+    """"1:23:45" / "23:45" / "5025" / "5025.5" を秒にする。"""
+    parts = text.strip().split(":")
+    if not 1 <= len(parts) <= 3 or not all(parts):
+        raise ValueError(text)
+    sec = 0.0
+    for part in parts:
+        sec = sec * 60 + float(part)
+    if sec < 0:
+        raise ValueError(text)
+    return sec
+
+
+def parse_range(text: str) -> tuple[float, float]:
+    """"1:23:00-1:23:40" を (開始, 終了) の秒にする (--range 用)。"""
+    try:
+        a, b = text.split("-")
+        start, end = parse_time(a), parse_time(b)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"区間は 開始-終了 の形で指定してください (例: 1:23:00-1:23:40): {text}")
+    if end <= start:
+        raise argparse.ArgumentTypeError(f"終わりが始まりより前です: {text}")
+    return start, end
 
 
 def _print_result(highlights) -> None:
@@ -93,7 +122,7 @@ def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
     src = VodSource(url, work, quality=args.quality, full_download=args.full_download)
     result = process(cfg, src, chat, Path(cfg.output_dir) / f"{channel or 'vod'}_{video_id}",
                      duration=duration, clips=clips, channel=channel, stream_title=title, dry_run=args.dry_run,
-                     clip_vod=(video_id, 0.0),
+                     clip_vod=(video_id, 0.0), ranges=args.range,
                      # API で持ち主を確認できないときは指定されたチャンネルを使う
                      # (違っていれば Twitch 側が拒否し、1 回で作成をやめる)
                      clip_owner=owner or channel)
@@ -235,7 +264,7 @@ def cmd_local(cfg: Config, args: argparse.Namespace) -> int:
         viewers = load_viewers(args.viewers)
     out = Path(cfg.output_dir) / (args.name or Path(args.video).stem)
     result = process(cfg, LocalSource(args.video), chat, out, clips=clips, channel=args.channel or "",
-                     stream_title=args.title or "", dry_run=args.dry_run, viewers=viewers)
+                     stream_title=args.title or "", dry_run=args.dry_run, viewers=viewers, ranges=args.range)
     _print_result(result.highlights)
     return 0
 
@@ -336,6 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--transcribe", action="store_true", help="faster-whisper で字幕を付ける")
         sp.add_argument("--no-subtitles", action="store_true")
         sp.add_argument("--dry-run", action="store_true", help="検出だけ行い動画は作らない")
+        sp.add_argument("--silence-cut", action="store_true", help="話していない間を詰める (無音カット)")
+        sp.add_argument("--comments", action="store_true", help="チャットをアイコン付きの吹き出しで画面に出す")
         if twitch_clips:
             sp.add_argument("--twitch-clips", action="store_true",
                             help="検出した場面を Twitch の公式クリップとしても作る (要 login)")
@@ -347,6 +378,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-clips", action="store_true", help="既存クリップをシグナルに使わない")
     sp.add_argument("--quality", default="best", help="yt-dlp の format 指定 (例: 720p60/best)")
     sp.add_argument("--full-download", action="store_true", help="区間ごとでなく VOD 全体をダウンロード")
+    sp.add_argument("--range", type=parse_range, action="append",
+                    help="この区間だけをショートにする (例: 1:23:00-1:23:40)。複数指定できる")
     add_render_opts(sp)
     sp.set_defaults(func=cmd_vod)
 
@@ -393,6 +426,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--channel")
     sp.add_argument("--title", help="配信タイトル (LLM への文脈)")
     sp.add_argument("--name", help="出力サブディレクトリ名")
+    sp.add_argument("--range", type=parse_range, action="append",
+                    help="この区間だけをショートにする (例: 12:30-13:10)。複数指定できる")
     add_render_opts(sp, twitch_clips=False)  # 手元のファイルには VOD が無いのでクリップは作れない
     sp.set_defaults(func=cmd_local)
 

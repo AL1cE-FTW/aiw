@@ -46,6 +46,8 @@ twitch-shorts auto yuuki_ftw     # 起動しておくだけで、配信ごとに
 | `twitch-shorts feedback "Table data.csv"` | **YouTube の結果** (インプレッション・スワイプ率・維持率) を取り込み、検出設定を調整 |
 
 共通オプション: `-n 本数` / `--layout blur|crop|facecam` / `--transcribe` (字幕) / `--llm` (AI 評価・タイトル) / `--dry-run` (検出のみ)
+/ `--silence-cut` (無音カット) / `--comments` (チャットを吹き出しで表示)。`vod` / `local` は `--range 1:23:00-1:23:40` で区間を指定して作れます。
+ログインしていれば、配信中に付けたストリームマーカーの場面は必ずショートにします。
 
 ## セットアップ
 
