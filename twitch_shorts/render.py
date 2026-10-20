@@ -544,12 +544,14 @@ def hook_range(h: Highlight, cfg: RenderConfig) -> tuple[float, float] | None:
 
 def render_highlight(source: str, out_path: str, h: Highlight, cfg: RenderConfig,
                      segments: list[TranscriptSegment] | None = None, source_offset: float = 0.0,
-                     max_total: float | None = None, chat: list[ChatMessage] | None = None) -> str:
+                     max_total: float | None = None, chat: list[ChatMessage] | None = None,
+                     keep: list[tuple[float, float]] | None = None) -> str:
     """ハイライトを書き出す。``source_offset`` はソースファイル先頭が VOD 上の何秒目か。
 
     先見せを付けて ``max_total`` 秒を超える場合は本編を短くする。基本は頭 (前フリ) を削るが、
     盛り上がりのピークの少し前までしか削らず、それでも長い分は末尾を削る。
-    書き出した動画に合わせて ``h.start`` / ``h.end`` / ``h.video_duration`` を更新する。
+    書き出した動画に合わせて ``h.start`` / ``h.end`` / ``h.video_duration`` / ``h.keep`` を更新する。
+    keep: 残す区間 (ソース上の秒数) を直接指定する (編集画面で直したカット)。指定すると無音の検出はしない
     """
     hook = hook_range(h, cfg)
     lead_in = (hook[1] - hook[0]) if hook else 0.0
@@ -560,8 +562,10 @@ def render_highlight(source: str, out_path: str, h: Highlight, cfg: RenderConfig
         end = start + main_len
     seg = [TranscriptSegment(s.start - source_offset, s.end - source_offset, s.text) for s in segments or []]
     shifted_hook = (hook[0] - source_offset, hook[1] - source_offset) if hook else None
-    keep = None
-    if cfg.silence_cut:
+    if keep is not None:
+        keep = [(max(0.0, a - start), min(end, b) - start) for a, b in keep if min(end, b) - max(start, a) > 0.05]
+        keep = keep or None
+    elif cfg.silence_cut:
         from .audio import silent_ranges
 
         silences = silent_ranges(source, start - source_offset, end - start, cfg.silence_db, cfg.silence_min)
@@ -573,6 +577,7 @@ def render_highlight(source: str, out_path: str, h: Highlight, cfg: RenderConfig
     out = render_short(source, out_path, start - source_offset, end - source_offset, cfg, h.title, seg,
                        hook=shifted_hook, hook_text=h.hook, keep=keep, comments=comments)
     h.start, h.end = round(start, 2), round(end, 2)
+    h.keep = [[round(start + a, 2), round(start + b, 2)] for a, b in keep] if keep else []
     main_out = sum(b - a for a, b in keep) if keep else end - start
     h.video_duration = round(lead_in + main_out, 2)
     return out

@@ -249,6 +249,12 @@ class PublishConfig:
 
 
 @dataclass
+class UIConfig:
+    # タスクトレイと編集画面の表示言語 (ja / en)。画面で切り替えた場合はそちらが優先 (work/ui.json)
+    language: str = "ja"
+
+
+@dataclass
 class Config:
     output_dir: str = "output"
     work_dir: str = "work"
@@ -261,6 +267,7 @@ class Config:
     publish: PublishConfig = field(default_factory=PublishConfig)
     clips: ClipsConfig = field(default_factory=ClipsConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    ui: UIConfig = field(default_factory=UIConfig)
 
 
 def _apply(obj, data: dict, path: str = "") -> None:

@@ -43,6 +43,9 @@ class LocalSource:
     def video_for(self, start: float, end: float) -> tuple[str, float]:
         return self.path, 0.0
 
+    def describe(self) -> dict:
+        return {"type": "local", "path": str(Path(self.path).resolve())}
+
 
 @dataclass
 class VodSource:
@@ -75,6 +78,19 @@ class VodSource:
         b = end + 3
         out = self.work_dir / "sections" / f"{int(a)}-{int(b)}.mp4"
         return str(download_section(self.url, a, b, out, self.quality)), a
+
+    def describe(self) -> dict:
+        return {"type": "vod", "url": self.url, "work_dir": str(Path(self.work_dir).resolve()),
+                "quality": self.quality, "full_download": self.full_download}
+
+
+def source_from_dict(d: dict) -> MediaSource:
+    """プロジェクトに保存したソースの情報から作り直す (編集画面で書き出し直すとき用)。"""
+    if d.get("type") == "vod":
+        return VodSource(d["url"], Path(d["work_dir"]), d.get("quality", "best"), bool(d.get("full_download")))
+    if d.get("type") == "local":
+        return LocalSource(d["path"])
+    raise ValueError(f"ソースの種類が分かりません: {d.get('type')}")
 
 
 @dataclass
@@ -399,6 +415,8 @@ def process(
         _make_twitch_clips(cfg, rendered, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
                            owner=channel if clip_owner is None else clip_owner)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
+    if not dry_run and rendered and hasattr(source, "describe"):
+        _write_project(run_dir, rendered, source, transcripts, chat, channel, stream_title, duration)
     if want_web:
         # 配信後の一覧ページ (worker/) に、ショートにした場面と次点の候補を送る
         from .web_upload import build_payload, run_id_for, upload_run
@@ -491,6 +509,32 @@ def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple
 def _hms(t: float, sep: str = "") -> str:
     t = int(t)
     return f"{t // 3600:02d}{sep}{t % 3600 // 60:02d}{sep}{t % 60:02d}"
+
+
+PROJECT_FILE = "project.json"
+
+
+def _write_project(run_dir: Path, rendered: list[Highlight], source, transcripts: dict, chat: list[ChatMessage],
+                   channel: str, title: str, duration: float) -> None:
+    """編集画面 (twitch-shorts edit) で開き直すための情報を保存する。ライブの逐次処理では前回の分に追加する。"""
+    from .fileutil import read_json, write_json_atomic
+
+    path = run_dir / PROJECT_FILE
+    old = read_json(path, {})
+    shorts = [s for s in (old.get("shorts") or []) if isinstance(s, dict)] if isinstance(old, dict) else []
+    done = {s.get("highlight", {}).get("output_path") for s in shorts}
+    for h in rendered:
+        if h.output_path in done:
+            shorts = [s for s in shorts if s.get("highlight", {}).get("output_path") != h.output_path]
+        shorts.append({
+            "highlight": h.to_dict(),
+            "segments": [[round(s.start, 2), round(s.end, 2), s.text] for s in transcripts.get(id(h)) or []],
+            # 区間を広げても使えるよう、前後 60 秒のチャットも残す
+            "chat": [[round(m.offset, 2), m.user, m.text] for m in chat if h.start - 60 <= m.offset <= h.end + 60],
+        })
+    shorts.sort(key=lambda s: s["highlight"].get("start", 0))
+    write_json_atomic(path, {"channel": channel, "stream_title": title, "duration": duration,
+                             "source": source.describe(), "shorts": shorts})
 
 
 def _write_report(run_dir: Path, highlights: list[Highlight], channel: str, title: str, duration: float) -> None:

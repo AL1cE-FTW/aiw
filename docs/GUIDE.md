@@ -253,6 +253,26 @@ twitch-shorts schedule
 YouTube Studio や TikTok の予約投稿にこの順番で登録していくのがおすすめです。
 時刻や本数は `config.toml` の `[publish]` で変えられます。
 
+### 編集画面 (タイムライン) で直す
+
+```bash
+twitch-shorts edit
+```
+
+一番新しい配信のショートを、ブラウザの編集画面で開きます (タスクトレイの「編集画面を開く」からも開けます)。
+PC の中だけで動く画面で、外からは見られません。
+
+- 上の段から **区間**・**カット**・**字幕**・**チャット** のタイムライン。左の映像は元の配信で、カットした所は飛ばして再生します
+- **区間**: 紫のつまみをドラッグして始まり・終わりを直す (右の欄で秒数も直せます)
+- **カット**: 「無音を検出」で話していない間を自動で入れる。段をドラッグして足す・クリックで消す
+- **字幕**: クリックで文字・時刻を直す、ドラッグで移動、段をダブルクリックか「字幕を追加」で足す
+- タイトル・引きの言葉・コメント字幕の有無も右の欄で直せます
+- `Ctrl+Z` 元に戻す / `Ctrl+Shift+Z` やり直す / `Ctrl+S` 保存 / `Space` 再生
+- **書き出し** を押すと、同じファイル名のショートを作り直します (失敗しても元のショートは残ります)。
+  直した内容は `project.json` に保存され、次に開いたときも続きから直せます
+- 左上で **表示言語** (日本語 / English) を切り替えられます。タスクトレイのメニューも同じ言語になります
+- 編集画面で直せるのは、この機能を入れた後に作ったショートです
+
 ### Twitch クリップ
 
 ログインしていれば、検出した場面が Twitch のクリップとして自動で作られます
@@ -424,6 +444,7 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_20261008/config.tuned.
 | `[render] silence_cut` | false | 話していない間を詰める |
 | `[render] comments` | false | チャットを吹き出しで画面に出す |
 | `[detect] use_markers` | true | ストリームマーカーの場面を必ず作る (要ログイン) |
+| `[ui] language` | ja | タスクトレイと編集画面の表示言語 (ja / en) |
 | `[render] font` | OS に合わせて自動 | 字幕のフォント |
 | `[publish] post_time` | 19:00 | 投稿予定の時刻 |
 | `[clips] max_per_stream` | 5 | 1 配信で作る Twitch クリップの最大数 |
@@ -453,6 +474,7 @@ twitch-shorts -c config.toml -c output/analysis_yuuki_ftw_20261008/config.tuned.
   [ログイン (Device Code Grant Flow)](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/)
 - 無音カット・コメント字幕・ストリームマーカー・区間の指定・SRT 書き出し: [Stretheus のリリースノート](https://github.com/evolutysystems/autoedit/releases)
   (v1.4.0〜v1.4.7 の機能を、このツールの自動処理に合わせて作り直したもの。コードは使っていない)、
+  タイムライン編集画面・表示言語の切り替えも同じリリースノート (v1.4.1〜v1.5.6) を参考にした、
   Twitch API [Get Stream Markers](https://dev.twitch.tv/docs/api/markers/)
 - ショートの作り方: タルレミ・エラ「[OW動画投稿講座](https://note.com/tallemi_ella/n/na6e518039897)」
   (冒頭 3 秒・テロップ位置の固定・毎日同じ時間に投稿・見るべき指標)

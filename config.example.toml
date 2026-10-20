@@ -65,6 +65,9 @@ comment_max_chars = 16    # 長いコメントはここで切る
 comment_position = 0.56   # 一番上の段の位置 (画面上端からの割合)
 export_srt = false        # 字幕を .srt でも書き出す (YouTube の字幕や動画編集ソフトで直すとき用)
 
+[ui]
+language = "ja"           # タスクトレイと編集画面の表示言語 (ja / en)。画面で切り替えるとそちらが優先
+
 [transcribe]
 enabled = false         # true にするには: pip install 'twitch-shorts[transcribe]'
 model = "small"         # tiny / base / small / medium / large-v3

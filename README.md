@@ -40,6 +40,7 @@ twitch-shorts auto yuuki_ftw     # 起動しておくだけで、配信ごとに
 | `twitch-shorts latest yuuki_ftw` | **最新アーカイブを処理**。処理済み VOD はスキップするので cron / GitHub Actions 向け |
 | `twitch-shorts vod <URL or ID>` | 指定した VOD を処理 |
 | `twitch-shorts local 録画.mp4 --chat chat.json` | 手元の録画ファイル＋チャットログから作る |
+| `twitch-shorts edit [出力フォルダー]` | **タイムライン編集画面**をブラウザで開く。区間・字幕・無音カット・タイトルを直して書き出し直す |
 | `twitch-shorts chat <URL or ID>` | VOD のチャットを JSONL で保存するだけ |
 | `twitch-shorts analyze yuuki_ftw` | **よく見られたクリップを分析**し、レポートと推奨設定 (`config.tuned.toml`) を作る |
 | `twitch-shorts schedule` | 作ったショートの**投稿予定** (毎日同じ時刻に 1 本) を表示 |

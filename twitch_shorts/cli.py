@@ -177,6 +177,24 @@ def cmd_tray(cfg: Config, args: argparse.Namespace) -> int:
     return run_tray(args.channel.lower(), cfg.work_dir, cfg.output_dir, args.config)
 
 
+def cmd_edit(cfg: Config, args: argparse.Namespace) -> int:
+    from .editor import find_projects, serve
+
+    if args.run_dir:
+        run_dir = Path(args.run_dir)
+    else:
+        found = find_projects(cfg.output_dir)
+        if not found:
+            print(f"編集できるショートがありません ({cfg.output_dir})。先にショートを作ってください", file=sys.stderr)
+            return 1
+        run_dir = found[0]
+    try:
+        return serve(cfg, run_dir, port=args.port, open_browser=not args.no_browser)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
 def cmd_login(cfg: Config, args: argparse.Namespace) -> int:
     from .twitch_auth import TwitchAuthError, device_login
 
@@ -403,6 +421,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("tray", help="タスクトレイにアイコンを常駐させ、自動処理 (auto) をメニューで切り替える")
     sp.add_argument("channel", nargs="?", default="yuuki_ftw")
     sp.set_defaults(func=cmd_tray)
+
+    sp = sub.add_parser("edit", help="書き出したショートをタイムラインで直す (ブラウザで開く)")
+    sp.add_argument("run_dir", nargs="?", help="出力フォルダー (省略時は一番新しいもの)")
+    sp.add_argument("-o", "--output", help="出力ディレクトリ (run_dir を省略したときに探す場所)")
+    sp.add_argument("--port", type=int, default=0, help="使うポート (省略時は空いているもの)")
+    sp.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
+    sp.set_defaults(func=cmd_edit)
 
     sp = sub.add_parser("login", help="配信者アカウントで Twitch にログイン (公式クリップの自動作成用)")
     sp.set_defaults(func=cmd_login)

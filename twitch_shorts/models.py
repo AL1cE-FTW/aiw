@@ -84,6 +84,7 @@ class Highlight:
     twitch_clip: str = ""  # 作成した Twitch 公式クリップの公開 URL (視聴者に共有できる)
     twitch_clip_edit: str = ""  # そのクリップの編集ページ (配信者本人のみ)
     vod_url: str = ""  # VOD のこの場面を開く URL (手動でクリップするとき用)
+    keep: list[list[float]] = field(default_factory=list)  # 無音カットで残した区間 (ソース上の秒数)。空なら全部
 
     @property
     def duration(self) -> float:

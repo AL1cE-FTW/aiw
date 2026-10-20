@@ -5,6 +5,8 @@
 - 「自動処理」: auto を裏で動かす / 止める。止めるときは処理の途中でも成果物が壊れないよう、
   いまの処理が終わってから止まる (Ctrl+C と同じ)
 - 「PC の起動時に起動」: Windows のスタートアップにこのアイコンを登録する / 外す
+- 「編集画面を開く」: 一番新しいショートをタイムラインで直す画面 (twitch-shorts edit) をブラウザで開く
+- 「表示言語 / Language」: メニューと編集画面の言語 (日本語 / English) を切り替える
 - アイコンの色: 緑 = 動作中、黄 = 止めている途中、灰 = 停止、赤 = エラーで停止
 pip install 'twitch-shorts[tray]' (pystray と Pillow) が必要。
 """
@@ -22,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .fileutil import file_lock, read_json, write_json_atomic
+from .i18n import LANGUAGES, set_ui_language, tray_text, ui_language
 from .watcher import STOP_FILE_ENV
 
 log = logging.getLogger(__name__)
@@ -87,24 +90,19 @@ class AutoController:
             return "stopping" if self.stopping else "running"
         return "error" if self.error else "stopped"
 
-    def status_text(self) -> str:
-        return {
-            "running": "動作中 (配信を待って自動でショートを作ります)",
-            "stopping": "止めています… (いまの処理が終わったら止まります)",
-            "stopped": "停止中",
-            "error": f"エラーで停止しました ({self.error})。ログを確認してください",
-        }[self.status()]
+    def status_text(self, lang: str = "ja") -> str:
+        return tray_text(lang, self.status(), error=self.error)
 
     # --- 操作 ---------------------------------------------------------------
 
-    def command(self) -> list[str]:
+    def command(self, *args: str) -> list[str]:
         python = Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").exists():
             python = python.with_name("python.exe")  # 出力をログに残すため (窓は CREATE_NO_WINDOW で出さない)
         cmd = [str(python), "-m", "twitch_shorts.cli"]
         for p in self.config_paths:
             cmd += ["-c", p]
-        return cmd + ["auto", self.channel]
+        return cmd + (list(args) or ["auto", self.channel])
 
     def start(self) -> bool:
         with self._lock:
@@ -242,6 +240,16 @@ def set_startup(enabled: bool, channel: str, config_paths: list[str] | None = No
 # アイコン
 # ---------------------------------------------------------------------------
 
+def _config_language(config_paths: list[str] | None) -> str:
+    """設定ファイルの [ui] language (画面で切り替えていないときの言語)。"""
+    try:
+        from .config import load_config
+
+        return load_config(config_paths or None).ui.language
+    except Exception:  # 設定の誤りは auto 側で知らせる
+        return "ja"
+
+
 def _setup_logging(path: Path) -> None:
     """pythonw で起動したときは画面に何も出ないので、ログをファイルに残す。"""
     root = logging.getLogger()
@@ -350,6 +358,14 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
 
     ctl = AutoController(channel, work_dir, config_paths)
     quitting = threading.Event()
+    default_lang = _config_language(config_paths)
+    editor_proc: list = []
+
+    def lang() -> str:
+        return ui_language(work_dir, default_lang)
+
+    def text(key: str):
+        return lambda item: tray_text(lang(), key)
 
     def notify(icon, message: str) -> None:
         try:
@@ -360,7 +376,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
     def refresh(icon) -> None:
         status = ctl.status()
         icon.icon = make_image(status)
-        icon.title = f"twitch-shorts ({channel}): {ctl.status_text()}"[:127]
+        icon.title = f"twitch-shorts ({channel}): {ctl.status_text(lang())}"[:127]
         icon.update_menu()
 
     def in_background(fn):
@@ -399,7 +415,32 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         if page:
             open_path(page)
         else:
-            notify(icon, "まだ確認ページがありません。配信が終わると作られます")
+            notify(icon, "まだ確認ページがありません。配信が終わると作られます" if lang() == "ja"
+                   else "There is no review page yet. It is made after a stream ends")
+
+    def open_editor(icon, item) -> None:
+        from .editor import find_projects
+
+        found = find_projects(output_dir)
+        if not found:
+            notify(icon, tray_text(lang(), "no_project"))
+            return
+        for proc in editor_proc:  # 前に開いた編集画面のサーバーは閉じる (1 つだけにする)
+            if proc.poll() is None:
+                proc.terminate()
+        editor_proc.clear()
+        log_dir = Path(work_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "editor.log", "a", encoding="utf-8") as out:
+            editor_proc.append(ctl.popen(ctl.command("edit", str(found[0])), cwd=ctl.cwd, stdout=out,
+                                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                         creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0))
+
+    def choose_language(code: str):
+        def action(icon, item) -> None:
+            set_ui_language(work_dir, code)
+            refresh(icon)
+        return action
 
     def open_log(icon, item) -> None:
         if ctl.log_path and ctl.log_path.exists():
@@ -433,20 +474,26 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
     def kill_now(icon) -> None:
         ctl.kill()
 
+    languages = pystray.Menu(*[
+        pystray.MenuItem(name, choose_language(code), checked=(lambda item, c=code: lang() == c), radio=True)
+        for code, name in LANGUAGES.items()
+    ])
     menu = pystray.Menu(
-        pystray.MenuItem(lambda item: ctl.status_text(), None, enabled=False),
+        pystray.MenuItem(lambda item: ctl.status_text(lang()), None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("自動処理 (配信ごとにショートを作る)", toggle_auto,
+        pystray.MenuItem(text("auto"), toggle_auto,
                          checked=auto_checked, enabled=lambda item: not quitting.is_set()),
-        pystray.MenuItem("PC の起動時にこのアイコンを起動", toggle_startup,
+        pystray.MenuItem(text("startup"), toggle_startup,
                          checked=lambda item: startup_enabled(), visible=os.name == "nt"),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("最新の確認ページを開く", open_review, default=True),
-        pystray.MenuItem("出力フォルダーを開く", open_output),
-        pystray.MenuItem("ログを開く", open_log),
+        pystray.MenuItem(text("review"), open_review, default=True),
+        pystray.MenuItem(text("editor"), open_editor),
+        pystray.MenuItem(text("output"), open_output),
+        pystray.MenuItem(text("log"), open_log),
+        pystray.MenuItem(text("language"), languages),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("すぐに止める (作りかけは残りません)", kill_now, visible=lambda item: ctl.stopping),
-        pystray.MenuItem("終了", quit_app),
+        pystray.MenuItem(text("kill"), kill_now, visible=lambda item: ctl.stopping),
+        pystray.MenuItem(text("quit"), quit_app),
     )
     icon = pystray.Icon("twitch-shorts", make_image("stopped"), f"twitch-shorts ({channel})", menu)
 
@@ -459,7 +506,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
                     time.sleep(2)
                 changed = ctl.check()
                 if changed and ctl.error and not quitting.is_set():
-                    notify(icon, f"自動処理が止まりました ({ctl.error})。ログを確認してください")
+                    notify(icon, tray_text(lang(), "stopped_notify", error=ctl.error))
                 if not quitting.is_set() and ctl.keep_alive():
                     changed = True
                 if changed or first:
@@ -476,6 +523,9 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
     finally:
         for t in exit_timers:
             t.cancel()
+        for proc in editor_proc:
+            if proc.poll() is None:
+                proc.terminate()
         ctl.stop()
         single.__exit__(None, None, None)
     return 0
