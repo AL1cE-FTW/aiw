@@ -15,7 +15,7 @@ import numpy as np
 
 from . import audio as audio_mod
 from .config import Config
-from .detector import detect_highlights, snap_to_transcript
+from .detector import detect_highlights, sample_chat, snap_to_transcript
 from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample, normalize_hashtag
 from .render import render_highlight
 
@@ -42,6 +42,9 @@ class LocalSource:
 
     def video_for(self, start: float, end: float) -> tuple[str, float]:
         return self.path, 0.0
+
+    def describe(self) -> dict:
+        return {"type": "local", "path": str(Path(self.path).resolve())}
 
 
 @dataclass
@@ -76,6 +79,19 @@ class VodSource:
         out = self.work_dir / "sections" / f"{int(a)}-{int(b)}.mp4"
         return str(download_section(self.url, a, b, out, self.quality)), a
 
+    def describe(self) -> dict:
+        return {"type": "vod", "url": self.url, "work_dir": str(Path(self.work_dir).resolve()),
+                "quality": self.quality, "full_download": self.full_download}
+
+
+def source_from_dict(d: dict) -> MediaSource:
+    """プロジェクトに保存したソースの情報から作り直す (編集画面で書き出し直すとき用)。"""
+    if d.get("type") == "vod":
+        return VodSource(d["url"], Path(d["work_dir"]), d.get("quality", "best"), bool(d.get("full_download")))
+    if d.get("type") == "local":
+        return LocalSource(d["path"])
+    raise ValueError(f"ソースの種類が分かりません: {d.get('type')}")
+
 
 @dataclass
 class RunResult:
@@ -104,6 +120,40 @@ def fill_template(template: str, values: dict) -> str:
         return template.strip()
 
 
+def _marker_highlights(cfg: Config, markers: list, shift: float, duration: float, chat: list[ChatMessage],
+                       detected: list[Highlight], exclude: list[Highlight], available_from: float | None,
+                       available_until: float | None, top_score: float) -> list[Highlight]:
+    """ストリームマーカーの位置 (VOD 上の秒数 - shift = ソース上の秒数) から候補を作る。"""
+    d = cfg.detect
+    out: list[Highlight] = []
+    for m in markers:
+        t = float(m.position) - shift
+        if not 0 <= t <= duration:
+            continue
+        start = max(0.0, t - d.marker_before)
+        end = min(duration, t + d.marker_after)
+        if end - start > d.max_duration:
+            start = end - d.max_duration
+        if end - start < d.min_duration:
+            start = max(0.0, end - d.min_duration)
+            end = min(duration, start + d.min_duration)
+        h = Highlight(start=round(start, 2), end=round(end, 2), peak=round(max(start, t - 8.0), 2),
+                      score=round(top_score + 1, 3), signals={"marker": 1.0},
+                      reason=f"ストリームマーカー: {m.description}" if m.description else "ストリームマーカー",
+                      chat_sample=sample_chat(chat, start, end + d.chat_delay))
+        if (h.start < d.skip_start or (d.skip_end > 0 and h.end > duration - d.skip_end)
+                or any(h.overlaps(e, margin=5) for e in exclude) or any(h.overlaps(o) for o in out)
+                or (available_until is not None and h.end > available_until)
+                or (available_from is not None and h.start < available_from)):
+            continue
+        # 重なる自動の候補があれば、盛り上がりの位置 (先見せに使う) はそちらを使う
+        near = [c for c in detected if c.overlaps(h) and h.start <= c.peak <= h.end]
+        if near:
+            h.peak = max(near, key=lambda c: c.score).peak
+        out.append(h)
+    return out
+
+
 def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
     return fill_template(cfg.render.title_template, _template_vars(h, index, channel))
 
@@ -126,6 +176,8 @@ def process(
     clip_vod: tuple[str, float] | None = None,
     clip_owner: str | None = None,
     publish: bool = True,
+    ranges: list[tuple[float, float]] | None = None,
+    markers: list | None = None,
 ) -> RunResult:
     """ハイライトを検出し、ショート動画を ``run_dir`` に書き出す。
 
@@ -136,6 +188,8 @@ def process(
                       clips.enabled のとき、この VOD から Twitch の公式クリップを作る
     clip_owner:       VOD の持ち主のチャンネル名 (省略時は channel)。クリップを作れるかの判定に使う
     publish:          False なら投稿予定表に載せない (配信中のプレビューなど)
+    ranges:           指定するとその区間 [(開始, 終了)] だけをショートにする (自動の検出は使わない)
+    markers:          ストリームマーカー (VOD 上の位置)。省略時は clip_vod の VOD から取得する (要 login)
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -156,7 +210,11 @@ def process(
     if not chat and loudness is None and not clips and not viewers:
         raise ValueError("チャット・音声・クリップのいずれも無いため検出できません")
 
-    n_target = cfg.detect.top_n
+    if ranges:
+        bad = [(a, b) for a, b in ranges if not 0 <= a < b <= duration + 1]
+        if bad:
+            raise ValueError(f"区間が動画の範囲外か、終わりが始まりより前です: {bad}")
+    n_target = len(ranges) if ranges else cfg.detect.top_n
     n_pool = n_target * (cfg.llm.candidate_factor if cfg.llm.enabled else 1)
     # 一覧ページ (worker/) に送るときは、次点の候補も載せられるよう多めに検出する
     want_web = bool(cfg.web.url and cfg.web.upload_token and clip_vod and publish and not dry_run)
@@ -164,7 +222,7 @@ def process(
         log.warning("[web] url はありますが upload_token が無いため、切り抜き候補ページには送りません")
     n_extra = WEB_EXTRA_CANDIDATES if want_web else 0
     # 画面が止まっている場面を飛ばしたときに埋める予備の候補
-    n_spare = n_target if cfg.detect.max_frozen < 1 and not dry_run else 0
+    n_spare = n_target if cfg.detect.max_frozen < 1 and not dry_run and not ranges else 0
     n_candidates = n_pool + n_spare + n_extra + len(exclude) * 2
     candidates, score = detect_highlights(
         duration, chat, cfg.detect, loudness, clips, top_n=n_candidates, viewers=viewers
@@ -178,12 +236,36 @@ def process(
     spares = candidates[n_pool:n_pool + n_spare]
     extras = candidates[n_pool + n_spare:n_pool + n_spare + n_extra]  # ショートの対象外。一覧ページにだけ載せる
     candidates = candidates[:n_pool]
-    log.info("候補 %d 件を検出", len(candidates))
+    top_score = max((h.score for h in candidates), default=5.0)
+    manual_bounds: dict[int, tuple[float, float]] = {}
+    if ranges:
+        # 区間を指定した場合は、その区間だけを作る
+        candidates = [Highlight(start=round(a, 2), end=round(min(b, duration), 2), peak=round((a + b) / 2, 2),
+                                score=round(top_score + 1, 3), signals={"manual": 1.0},
+                                chat_sample=sample_chat(chat, a, b + cfg.detect.chat_delay))
+                      for a, b in sorted(ranges)]
+        spares, extras = [], []
+        manual_bounds = {id(h): (h.start, h.end) for h in candidates}
+        log.info("指定された区間 %d 件から作ります", len(candidates))
+    else:
+        if markers is None and cfg.detect.use_markers and clip_vod:
+            from .twitch_markers import markers_for_vod
+
+            markers = markers_for_vod(cfg.twitch.client_id, cfg.twitch.client_secret, cfg.work_dir, clip_vod[0])
+        forced = _marker_highlights(cfg, markers or [], clip_vod[1] if clip_vod else 0.0, duration, chat,
+                                    candidates + spares, exclude, available_from, available_until, top_score)
+        if forced:
+            # 配信者自身が印を付けた場面なので、必ず候補の先頭に入れる (重なる自動の候補は外す)
+            rest = [h for h in candidates if not any(h.overlaps(f) for f in forced)]
+            candidates = forced + rest[:max(0, n_pool - len(forced))]
+            spares = [h for h in spares if not any(h.overlaps(f) for f in forced)]
+        log.info("候補 %d 件を検出", len(candidates))
 
     from .llm import provider_of
 
     # 配信中のプレビュー (publish=False) では、配信の音声をまるごと聞かせる処理は重いので配信後の正式版だけで行う
-    if cfg.llm.enabled and cfg.llm.scan_audio and provider_of(cfg.llm) == "gemini" and apath and publish:
+    if (cfg.llm.enabled and cfg.llm.scan_audio and provider_of(cfg.llm) == "gemini" and apath and publish
+            and not ranges):
         from .llm import model_of, scan_audio_with_gemini
 
         try:
@@ -209,8 +291,11 @@ def process(
             # 重なる場面は AI が選んだ方 (区間・タイトル付き) を残す
             # AI の点数 (0〜10) とシグナルの点数は大体同じ範囲なので、まとめて点数順に並べる
             # (後の AI の評価が失敗したときも、良い候補から選ばれるように)
-            candidates = sorted(found + [h for h in candidates if not any(h.overlaps(f) for f in found)],
-                                key=lambda h: h.score, reverse=True)
+            pinned = [h for h in candidates if "marker" in h.signals]
+            found = [h for h in found if not any(h.overlaps(p) for p in pinned)]
+            candidates = pinned + sorted(
+                found + [h for h in candidates if h not in pinned and not any(h.overlaps(f) for f in found)],
+                key=lambda h: h.score, reverse=True)
         except Exception as e:
             if cfg.llm.require:
                 raise
@@ -262,9 +347,16 @@ def process(
                     raise
                 log.warning("LLM 評価に失敗したため、シグナルのみの順位を使います: %s", e)
 
+    # 指定された区間は文の切れ目合わせや AI の調整で動かさない
+    for h in candidates:
+        if id(h) in manual_bounds:
+            h.start, h.end = manual_bounds[id(h)]
+    # ストリームマーカーの場面は AI の評価が低くても必ず作る
+    candidates = ([h for h in candidates if "marker" in h.signals]
+                  + [h for h in candidates if "marker" not in h.signals])
     frozen_ids: set[int] = set()
     videos_of: dict[int, tuple[str, float]] = {}  # 調べるときに用意した動画を書き出しでも使う
-    if dry_run or cfg.detect.max_frozen >= 1:
+    if dry_run or cfg.detect.max_frozen >= 1 or ranges:
         selected = candidates[:n_target]
     else:
         # 画面がほとんど動いていない場面 (映っていない画面・ロード画面など) は飛ばし、次点の候補で埋める
@@ -276,7 +368,8 @@ def process(
                 continue
             try:
                 video, offset = videos_of[id(h)] = source.video_for(h.start, h.end)
-                frozen = audio_mod.frozen_ratio(video, h.start - offset, h.duration)
+                # ストリームマーカーの場面は配信者が選んだものなので、画面が止まっていても作る
+                frozen = 0.0 if "marker" in h.signals else audio_mod.frozen_ratio(video, h.start - offset, h.duration)
             except Exception as e:  # 調べられない場面は書き出しを試す (失敗すれば書き出しの所で飛ばす)
                 log.warning("画面が動いているか調べられませんでした (%s〜): %s", _hms(h.start, ":"), e)
                 frozen = 0.0
@@ -310,7 +403,7 @@ def process(
         try:
             video, offset = videos_of.get(id(h)) or source.video_for(h.start, h.end)
             render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
-                             max_total=cfg.detect.max_duration)
+                             max_total=None if ranges else cfg.detect.max_duration, chat=chat)
         except Exception as e:  # 1 本の失敗 (区間のダウンロード失敗など) で残りを止めない
             log.warning("書き出しに失敗したため、この 1 本は飛ばします (%s): %s", out.name, e)
             continue
@@ -322,6 +415,8 @@ def process(
         _make_twitch_clips(cfg, rendered, clip_vod, already=sum(1 for e in exclude if e.twitch_clip),
                            owner=channel if clip_owner is None else clip_owner)
     _write_report(run_dir, selected + exclude, channel, stream_title, duration)
+    if not dry_run and rendered and hasattr(source, "describe"):
+        _write_project(run_dir, rendered, source, transcripts, chat, channel, stream_title, duration)
     if want_web:
         # 配信後の一覧ページ (worker/) に、ショートにした場面と次点の候補を送る
         from .web_upload import build_payload, run_id_for, upload_run
@@ -414,6 +509,32 @@ def _make_twitch_clips(cfg: Config, highlights: list[Highlight], clip_vod: tuple
 def _hms(t: float, sep: str = "") -> str:
     t = int(t)
     return f"{t // 3600:02d}{sep}{t % 3600 // 60:02d}{sep}{t % 60:02d}"
+
+
+PROJECT_FILE = "project.json"
+
+
+def _write_project(run_dir: Path, rendered: list[Highlight], source, transcripts: dict, chat: list[ChatMessage],
+                   channel: str, title: str, duration: float) -> None:
+    """編集画面 (twitch-shorts edit) で開き直すための情報を保存する。ライブの逐次処理では前回の分に追加する。"""
+    from .fileutil import read_json, write_json_atomic
+
+    path = run_dir / PROJECT_FILE
+    old = read_json(path, {})
+    shorts = [s for s in (old.get("shorts") or []) if isinstance(s, dict)] if isinstance(old, dict) else []
+    done = {s.get("highlight", {}).get("output_path") for s in shorts}
+    for h in rendered:
+        if h.output_path in done:
+            shorts = [s for s in shorts if s.get("highlight", {}).get("output_path") != h.output_path]
+        shorts.append({
+            "highlight": h.to_dict(),
+            "segments": [[round(s.start, 2), round(s.end, 2), s.text] for s in transcripts.get(id(h)) or []],
+            # 区間を広げても使えるよう、前後 60 秒のチャットも残す
+            "chat": [[round(m.offset, 2), m.user, m.text] for m in chat if h.start - 60 <= m.offset <= h.end + 60],
+        })
+    shorts.sort(key=lambda s: s["highlight"].get("start", 0))
+    write_json_atomic(path, {"channel": channel, "stream_title": title, "duration": duration,
+                             "source": source.describe(), "shorts": shorts})
 
 
 def _write_report(run_dir: Path, highlights: list[Highlight], channel: str, title: str, duration: float) -> None:

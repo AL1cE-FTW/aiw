@@ -40,12 +40,15 @@ twitch-shorts auto yuuki_ftw     # 起動しておくだけで、配信ごとに
 | `twitch-shorts latest yuuki_ftw` | **最新アーカイブを処理**。処理済み VOD はスキップするので cron / GitHub Actions 向け |
 | `twitch-shorts vod <URL or ID>` | 指定した VOD を処理 |
 | `twitch-shorts local 録画.mp4 --chat chat.json` | 手元の録画ファイル＋チャットログから作る |
+| `twitch-shorts edit [出力フォルダー]` | **タイムライン編集画面**をブラウザで開く。区間・字幕・無音カット・タイトルを直して書き出し直す |
 | `twitch-shorts chat <URL or ID>` | VOD のチャットを JSONL で保存するだけ |
 | `twitch-shorts analyze yuuki_ftw` | **よく見られたクリップを分析**し、レポートと推奨設定 (`config.tuned.toml`) を作る |
 | `twitch-shorts schedule` | 作ったショートの**投稿予定** (毎日同じ時刻に 1 本) を表示 |
 | `twitch-shorts feedback "Table data.csv"` | **YouTube の結果** (インプレッション・スワイプ率・維持率) を取り込み、検出設定を調整 |
 
 共通オプション: `-n 本数` / `--layout blur|crop|facecam` / `--transcribe` (字幕) / `--llm` (AI 評価・タイトル) / `--dry-run` (検出のみ)
+/ `--silence-cut` (無音カット) / `--comments` (チャットを吹き出しで表示)。`vod` / `local` は `--range 1:23:00-1:23:40` で区間を指定して作れます。
+ログインしていれば、配信中に付けたストリームマーカーの場面は必ずショートにします。
 
 ## セットアップ
 

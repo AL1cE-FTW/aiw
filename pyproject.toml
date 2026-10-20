@@ -30,3 +30,6 @@ include = ["twitch_shorts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+twitch_shorts = ["*.html"]

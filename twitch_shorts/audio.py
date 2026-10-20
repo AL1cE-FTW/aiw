@@ -45,6 +45,21 @@ def frozen_ratio(path: str, start: float, duration: float) -> float:
     return frozen / duration if duration > 0 else 0.0
 
 
+def silent_ranges(path: str, start: float, duration: float, noise_db: float = -35.0,
+                  min_len: float = 0.8) -> list[tuple[float, float]]:
+    """区間の中の無音 (noise_db 以下が min_len 秒以上続く所) を、区間の頭からの秒数で返す。音声が無ければ空。"""
+    err = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-ss", f"{max(0.0, start):.3f}", "-t", f"{duration:.3f}", "-i", path,
+         "-vn", "-af", f"silencedetect=n={noise_db}dB:d={min_len}", "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace",
+    ).stderr
+    starts = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", err)]
+    ends = [float(x) for x in re.findall(r"silence_end: (-?[\d.]+)", err)]
+    if len(ends) < len(starts):  # 区間の最後まで無音のまま
+        ends.append(duration)
+    return [(max(0.0, a), min(duration, b)) for a, b in zip(starts, ends) if b > a]
+
+
 def preview_clip(path: str, start: float, duration: float, out: str) -> None:
     """AI に見せる軽い動画 (360p・低画質) を切り出す。送る量と時間を減らすため。"""
     subprocess.run(

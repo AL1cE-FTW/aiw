@@ -24,10 +24,11 @@ DEVICE_URL = "https://id.twitch.tv/oauth2/device"
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
-# 自分のチャンネルのクリップ作成 (VOD から / 配信中)
-SCOPES = "channel:manage:clips clips:edit"
+# 自分のチャンネルのクリップ作成 (VOD から / 配信中) と、ストリームマーカーの読み取り
+SCOPES = "channel:manage:clips clips:edit user:read:broadcast"
 TOKEN_FILE = "twitch_user_token.json"
 CLIP_SCOPE = "channel:manage:clips"
+MARKER_SCOPE = "user:read:broadcast"
 
 log = logging.getLogger(__name__)
 

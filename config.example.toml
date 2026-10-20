@@ -28,6 +28,9 @@ viewer_delay = 30.0     # API の視聴者数の反映遅れ (秒)
 skip_start = 0.0         # 配信の最初の N 秒は使わない (待機画面の BGM・挨拶。例: 300 = 5 分)
 skip_end = 0.0           # 配信の最後の N 秒は使わない (エンディング)
 max_frozen = 0.5         # 画面がほとんど動かない時間がこの割合以上の区間は書き出さない (1 で無効)
+use_markers = true       # 配信中に付けたストリームマーカーの場面を必ず作る (要 twitch-shorts login)
+marker_before = 40.0     # マーカーの何秒前から使うか (マーカーは出来事の少し後に付けることが多いため)
+marker_after = 10.0      # マーカーの何秒後まで使うか
 
 [detect.keywords]
 # 既定のキーワード (草, w, KEKW, Pog, クリップ など) に追加・上書き。0 で無効化。
@@ -47,6 +50,23 @@ hook_seconds = 2.0        # 盛り上がりの瞬間を冒頭に先見せする�
 hook_text_seconds = 3.0   # 引きの言葉 (--llm 時) を表示する秒数
 caption_position = 0.38   # テロップの位置 (画面上端からの割合)。全動画で固定する
 caption_max_chars = 10    # テロップ 1 枚の最大文字数。超えたら次のテロップに分ける
+subtitle_color = "#FFFFFF"          # 字幕の文字色
+subtitle_outline_color = "#000000"  # 字幕の縁取りの色
+# --- 無音カット: 話していない間を詰めてテンポを上げる ---
+silence_cut = false       # true で有効 (コマンドなら --silence-cut)
+silence_db = -35.0        # これより小さい音を無音とみなす (dB)
+silence_min = 0.8         # この秒数以上続く無音だけ詰める
+silence_pad = 0.15        # 詰めた前後に残す余白 (秒)
+# --- コメント字幕: チャットをアイコン付きの吹き出しで画面に出す ---
+comments = false          # true で有効 (コマンドなら --comments)
+comment_lines = 3         # 一度に出す段数
+comment_seconds = 3.0     # 1 件を出す秒数
+comment_max_chars = 16    # 長いコメントはここで切る
+comment_position = 0.56   # 一番上の段の位置 (画面上端からの割合)
+export_srt = false        # 字幕を .srt でも書き出す (YouTube の字幕や動画編集ソフトで直すとき用)
+
+[ui]
+language = "ja"           # タスクトレイと編集画面の表示言語 (ja / en)。画面で切り替えるとそちらが優先
 
 [transcribe]
 enabled = false         # true にするには: pip install 'twitch-shorts[transcribe]'

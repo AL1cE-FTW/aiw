@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shorts Editor</title>
+<style>
+:root {
+  --bg: #f5f5f7; --panel: #ffffff; --text: #18181b; --muted: #6b6b76; --line: #e2e2e8;
+  --accent: #7c3aed; --accent-soft: #ede9fe; --range: #a78bfa; --cut: #ef4444; --sub: #0ea5e9; --chat: #f59e0b;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111114; --panel: #1b1b20; --text: #ececf1; --muted: #9a9aa6; --line: #2e2e36;
+          --accent: #a78bfa; --accent-soft: #2e2546; --range: #7c3aed; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 14px/1.5 system-ui, "Hiragino Sans", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif; }
+header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line);
+         background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+select, input, textarea, button { font: inherit; color: inherit; }
+select, input[type=text], input[type=number], textarea { background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 8px; }
+button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+.wrap { display: grid; grid-template-columns: 220px 1fr 300px; gap: 12px; padding: 12px; }
+@media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+.list button { display: block; width: 100%; text-align: left; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list button.on { border-color: var(--accent); background: var(--accent-soft); }
+.list small { color: var(--muted); display: block; }
+.videos { display: grid; grid-template-columns: 1fr 200px; gap: 12px; align-items: start; }
+@media (max-width: 700px) { .videos { grid-template-columns: 1fr; } }
+.stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; }
+.stage video { width: 100%; height: 100%; display: block; }
+.overlay-cap { position: absolute; left: 0; right: 0; top: 62%; text-align: center; color: #fff; font-weight: 700;
+  font-size: clamp(14px, 2.4vw, 24px); text-shadow: 0 0 4px #000, 0 0 2px #000; pointer-events: none; padding: 0 8px; }
+.overlay-chat { position: absolute; left: 8px; top: 20%; display: flex; flex-direction: column; gap: 4px; pointer-events: none; }
+.overlay-chat div { background: rgba(0,0,0,.55); color: #fff; border-radius: 999px; padding: 2px 10px; font-size: 12px; width: max-content; max-width: 60%; }
+.draft { position: absolute; right: 8px; top: 8px; background: rgba(0,0,0,.6); color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+.out video { width: 100%; border-radius: 8px; background: #000; aspect-ratio: 9 / 16; }
+.controls { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.timeline { position: relative; user-select: none; margin-top: 4px; }
+.track { position: relative; height: 30px; border-bottom: 1px solid var(--line); }
+.track .label { position: absolute; left: 0; top: 0; bottom: 0; width: 64px; font-size: 11px; color: var(--muted);
+  display: flex; align-items: center; z-index: 2; background: var(--panel); }
+.lane { position: absolute; left: 64px; right: 0; top: 0; bottom: 0; overflow: hidden; }
+.ruler { height: 22px; cursor: pointer; }
+.tick { position: absolute; top: 0; height: 100%; border-left: 1px solid var(--line); font-size: 10px; color: var(--muted); padding-left: 2px; }
+.blk { position: absolute; top: 4px; bottom: 4px; border-radius: 4px; font-size: 11px; color: #fff; overflow: hidden;
+  white-space: nowrap; text-overflow: ellipsis; padding: 2px 4px; cursor: grab; }
+.blk.range { background: var(--range); opacity: .55; cursor: default; }
+.blk.cut { background: repeating-linear-gradient(45deg, var(--cut), var(--cut) 4px, transparent 4px, transparent 8px);
+  border: 1px solid var(--cut); cursor: pointer; }
+.blk.sub { background: var(--sub); }
+.blk.sub.sel { outline: 2px solid var(--accent); }
+.handle { position: absolute; top: 0; bottom: 0; width: 8px; margin-left: -4px; background: var(--accent); cursor: ew-resize; border-radius: 3px; z-index: 3; }
+.chatdot { position: absolute; top: 9px; width: 3px; height: 12px; background: var(--chat); border-radius: 2px; }
+.playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--cut); pointer-events: none; z-index: 4; }
+.ghost { position: absolute; top: 4px; bottom: 4px; background: rgba(239,68,68,.3); }
+label.f { display: block; margin: 8px 0 2px; color: var(--muted); font-size: 12px; }
+.side input[type=text], .side textarea { width: 100%; }
+.row { display: flex; gap: 6px; }
+.row input { width: 100%; }
+.status { font-size: 12px; color: var(--muted); min-height: 18px; }
+.status.err { color: var(--cut); }
+.help { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.help kbd { border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <select id="lang" aria-label="Language"></select>
+  <h1 id="heading">…</h1>
+  <button id="undo" data-i18n="undo"></button>
+  <button id="redo" data-i18n="redo"></button>
+  <button id="save" data-i18n="save"></button>
+  <button id="render" class="primary" data-i18n="render"></button>
+</header>
+<div class="wrap">
+  <nav class="panel list" id="list"></nav>
+  <main class="panel">
+    <div class="videos">
+      <div>
+        <div class="stage">
+          <video id="src" preload="auto" playsinline></video>
+          <div class="overlay-chat" id="ochat"></div>
+          <div class="overlay-cap" id="ocap"></div>
+          <div class="draft" data-i18n="draft"></div>
+        </div>
+        <div class="controls">
+          <button id="play" data-i18n="play"></button>
+          <button id="playRange" data-i18n="playRange"></button>
+          <span class="time" id="time">0:00.0</span>
+          <span class="time" id="len"></span>
+          <span style="flex:1"></span>
+          <button id="silence" data-i18n="silence"></button>
+          <button id="clearCuts" data-i18n="clearCuts"></button>
+          <button id="addSub" data-i18n="addSub"></button>
+        </div>
+      </div>
+      <div class="out">
+        <div class="time" data-i18n="output"></div>
+        <video id="out" controls playsinline></video>
+      </div>
+    </div>
+    <div class="timeline" id="tl">
+      <div class="track ruler"><div class="label"></div><div class="lane" id="lRuler"></div></div>
+      <div class="track"><div class="label" data-i18n="tRange"></div><div class="lane" id="lRange"></div></div>
+      <div class="track"><div class="label" data-i18n="tCut"></div><div class="lane" id="lCut"></div></div>
+      <div class="track"><div class="label" data-i18n="tSub"></div><div class="lane" id="lSub"></div></div>
+      <div class="track"><div class="label" data-i18n="tChat"></div><div class="lane" id="lChat"></div></div>
+      <div class="playhead" id="ph"></div>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="help" id="help"></div>
+  </main>
+  <aside class="panel side">
+    <label class="f" data-i18n="title"></label><input type="text" id="title">
+    <label class="f" data-i18n="hook"></label><input type="text" id="hook">
+    <label class="f"><input type="checkbox" id="comments"> <span data-i18n="comments"></span></label>
+    <label class="f" data-i18n="range"></label>
+    <div class="row"><input type="number" id="start" step="0.1"><input type="number" id="end" step="0.1"></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
+    <div id="subPanel">
+      <label class="f" data-i18n="subText"></label><textarea id="subText" rows="2"></textarea>
+      <label class="f" data-i18n="subTime"></label>
+      <div class="row"><input type="number" id="subStart" step="0.1"><input type="number" id="subEnd" step="0.1"></div>
+      <div class="controls"><button id="delSub" data-i18n="delSub"></button></div>
+    </div>
+    <div id="noSub" class="time" data-i18n="noSub"></div>
+  </aside>
+</div>
+<script>
+"use strict";
+const TOKEN = "__TOKEN__";
+const T = {
+  ja: { undo: "元に戻す", redo: "やり直す", save: "保存", render: "書き出し", play: "再生 / 停止",
+        playRange: "区間を再生", silence: "無音を検出", clearCuts: "カットを全部消す", addSub: "字幕を追加",
+        output: "書き出したショート", draft: "プレビュー (表示は近似です)", tRange: "区間", tCut: "カット",
+        tSub: "字幕", tChat: "チャット", title: "タイトル", hook: "引きの言葉 (冒頭に大きく出す)",
+        comments: "コメント字幕を出す", range: "区間 (秒)", subText: "選んだ字幕", subTime: "字幕の時刻 (秒)",
+        delSub: "この字幕を消す", noSub: "字幕のブロックをクリックすると、ここで直せます",
+        saved: "保存しました", rendering: "書き出し中…", done: "書き出しました", error: "失敗しました: ",
+        loading: "元の映像を用意しています… (VOD ならダウンロードします)", detecting: "無音を探しています…",
+        unsaved: "未保存の変更があります", length: "長さ", after: "カット後",
+        help: "<kbd>Space</kbd> 再生 / <kbd>Ctrl</kbd>+<kbd>Z</kbd> 元に戻す / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> やり直す / <kbd>Delete</kbd> 選んだ字幕を消す。区間の端の紫のつまみをドラッグで区間を変更。カットの段をドラッグでカットを追加、カットをクリックで削除。字幕はドラッグで移動、字幕の段をダブルクリックで追加。",
+        noShorts: "ショートがありません", short: "ショート" },
+  en: { undo: "Undo", redo: "Redo", save: "Save", render: "Export", play: "Play / Pause",
+        playRange: "Play range", silence: "Detect silence", clearCuts: "Clear all cuts", addSub: "Add caption",
+        output: "Exported short", draft: "Preview (approximate)", tRange: "Range", tCut: "Cuts",
+        tSub: "Captions", tChat: "Chat", title: "Title", hook: "Hook text (shown big at the start)",
+        comments: "Show chat comments", range: "Range (seconds)", subText: "Selected caption", subTime: "Caption time (seconds)",
+        delSub: "Delete this caption", noSub: "Click a caption block to edit it here",
+        saved: "Saved", rendering: "Exporting…", done: "Exported", error: "Failed: ",
+        loading: "Preparing the source video… (downloads it for VODs)", detecting: "Looking for silence…",
+        unsaved: "You have unsaved changes", length: "Length", after: "after cuts",
+        help: "<kbd>Space</kbd> play / <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo / <kbd>Delete</kbd> delete the selected caption. Drag the purple handles to change the range. Drag on the cut lane to add a cut, click a cut to remove it. Drag captions to move them, double-click the caption lane to add one.",
+        noShorts: "No shorts", short: "Short" },
+};
+const $ = (id) => document.getElementById(id);
+const S = { data: null, cur: 0, edit: null, hist: [], fut: [], sel: -1, src: { offset: 0 }, view: [0, 1],
+            dirty: false, rangeEnd: null, jobs: {} };
+let lang = "ja";
+const tr = (k) => (T[lang] || T.ja)[k] || k;
+
+function api(path, body) {
+  const opt = body === undefined ? { headers: { "X-Token": TOKEN } }
+    : { method: "POST", headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  return fetch(path, opt).then(async (r) => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    return j;
+  });
+}
+function status(msg, err) { $("status").textContent = msg || ""; $("status").className = "status" + (err ? " err" : ""); }
+function fmt(t) { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - m * 60;
+  const h = Math.floor(m / 60); const mm = h ? String(m % 60).padStart(2, "0") : m;
+  return (h ? h + ":" : "") + mm + ":" + s.toFixed(1).padStart(4, "0"); }
+const round = (x) => Math.round(x * 100) / 100;
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = tr(el.dataset.i18n); });
+  $("help").innerHTML = tr("help");
+  renderList(); draw();
+}
+
+// --- 編集の履歴 (Undo / Redo) ---
+function commit(mutator) {
+  S.hist.push(clone(S.edit)); if (S.hist.length > 200) S.hist.shift();
+  S.fut = []; mutator(S.edit); S.dirty = true; syncForm(); draw();
+}
+function undo() { if (!S.hist.length) return; S.fut.push(clone(S.edit)); S.edit = S.hist.pop(); S.dirty = true; syncForm(); draw(); }
+function redo() { if (!S.fut.length) return; S.hist.push(clone(S.edit)); S.edit = S.fut.pop(); S.dirty = true; syncForm(); draw(); }
+
+// --- 一覧 ---
+function renderList() {
+  const box = $("list"); box.innerHTML = "";
+  if (!S.data || !S.data.shorts.length) { box.textContent = tr("noShorts"); return; }
+  S.data.shorts.forEach((s, i) => {
+    const b = document.createElement("button");
+    b.className = i === S.cur ? "on" : "";
+    const e = i === S.cur && S.edit ? S.edit : s.edit;
+    b.textContent = e.title || `${tr("short")} ${i + 1}`;
+    const sm = document.createElement("small");
+    const job = S.jobs[i]; sm.textContent = fmt(e.start) + " – " + fmt(e.end) + (job ? " · " + tr(job.status === "done" ? "done" : job.status === "error" ? "error" : "rendering") : "");
+    b.appendChild(sm);
+    b.onclick = () => select(i);
+    box.appendChild(b);
+  });
+}
+
+async function select(i) {
+  if (S.dirty && S.edit && !confirm(tr("unsaved"))) return;
+  S.cur = i; S.edit = clone(S.data.shorts[i].edit); S.hist = []; S.fut = []; S.sel = -1; S.dirty = false;
+  S.src = { offset: 0 };
+  syncForm(); renderList(); setOutput(); draw();
+  const v = $("src"); v.removeAttribute("src"); v.load();
+  status(tr("loading"));
+  try {
+    const m = await api(`/api/source?i=${i}`);
+    if (S.cur !== i) return;
+    S.src = m; v.src = m.url;
+    v.onloadedmetadata = () => { v.currentTime = Math.max(0, S.edit.start - S.src.offset); draw(); };
+    status("");
+  } catch (e) { status(tr("error") + e.message, true); }
+}
+function setOutput() {
+  const s = S.data.shorts[S.cur]; const o = $("out");
+  if (s.output) { o.src = s.output; } else { o.removeAttribute("src"); }
+}
+
+// --- 右側のフォーム ---
+function syncForm() {
+  const e = S.edit; if (!e) return;
+  $("title").value = e.title; $("hook").value = e.hook; $("comments").checked = !!e.comments;
+  $("start").value = e.start.toFixed(2); $("end").value = e.end.toFixed(2);
+  const s = e.segments[S.sel];
+  $("subPanel").style.display = s ? "" : "none"; $("noSub").style.display = s ? "none" : "";
+  if (s) { $("subText").value = s[2]; $("subStart").value = s[0].toFixed(2); $("subEnd").value = s[1].toFixed(2); }
+  const kept = keptLength();
+  $("len").textContent = `${tr("length")} ${(e.end - e.start).toFixed(1)}s` + (e.cuts.length ? ` / ${tr("after")} ${kept.toFixed(1)}s` : "");
+}
+function keptLength() { const e = S.edit; let cut = 0;
+  for (const [a, b] of e.cuts) cut += Math.max(0, Math.min(b, e.end) - Math.max(a, e.start)); return e.end - e.start - cut; }
+function bindInput(id, fn) { $(id).addEventListener("change", () => commit((e) => fn(e, $(id)))); }
+bindInput("title", (e, el) => { e.title = el.value; });
+bindInput("hook", (e, el) => { e.hook = el.value; });
+bindInput("comments", (e, el) => { e.comments = el.checked; });
+bindInput("start", (e, el) => { const v = +el.value; if (v >= 0 && v < e.end - 1) e.start = round(v); });
+bindInput("end", (e, el) => { const v = +el.value; if (v > e.start + 1) e.end = round(v); });
+bindInput("subText", (e, el) => { if (e.segments[S.sel]) e.segments[S.sel][2] = el.value; });
+bindInput("subStart", (e, el) => { const s = e.segments[S.sel]; if (s && +el.value < s[1]) s[0] = round(+el.value); });
+bindInput("subEnd", (e, el) => { const s = e.segments[S.sel]; if (s && +el.value > s[0]) s[1] = round(+el.value); });
+$("delSub").onclick = () => deleteSub();
+function deleteSub() { if (S.sel < 0) return; commit((e) => { e.segments.splice(S.sel, 1); }); S.sel = -1; syncForm(); draw(); }
+
+// --- タイムライン ---
+function viewRange() {
+  const e = S.edit; const v = $("src");
+  let a = e.start - 10, b = e.end + 10;
+  if (v.duration && isFinite(v.duration)) { a = Math.max(a, S.src.offset); b = Math.min(b, S.src.offset + v.duration); }
+  const d = S.data.duration; if (d) b = Math.min(b, d);
+  a = Math.max(0, Math.min(a, e.start)); b = Math.max(b, e.end);
+  S.view = [a, b];
+}
+function x(t) { const lane = $("lRange"); const w = lane.clientWidth; return (t - S.view[0]) / (S.view[1] - S.view[0]) * w; }
+function tAt(px) { const w = $("lRange").clientWidth; return S.view[0] + px / w * (S.view[1] - S.view[0]); }
+function el(cls, left, width, text) { const d = document.createElement("div"); d.className = cls;
+  d.style.left = left + "px"; if (width !== undefined) d.style.width = Math.max(2, width) + "px"; if (text) d.textContent = text; return d; }
+
+function draw() {
+  if (!S.edit) return;
+  viewRange();
+  const e = S.edit;
+  // 目盛り
+  const ruler = $("lRuler"); ruler.innerHTML = "";
+  // 目盛りの文字が重ならないよう、1 目盛りが 70px 以上になる間隔にする
+  const span = S.view[1] - S.view[0]; const perSec = $("lRuler").clientWidth / span;
+  const step = [1, 2, 5, 10, 15, 30, 60, 120].find((st) => st * perSec >= 70) || 300;
+  for (let t = Math.ceil(S.view[0] / step) * step; t <= S.view[1]; t += step) ruler.appendChild(el("tick", x(t), undefined, fmt(t)));
+  // 区間
+  const lr = $("lRange"); lr.innerHTML = "";
+  lr.appendChild(el("blk range", x(e.start), x(e.end) - x(e.start)));
+  const h1 = el("handle", x(e.start)), h2 = el("handle", x(e.end));
+  drag(h1, (t) => { S.edit.start = round(Math.max(0, Math.min(t, S.edit.end - 1))); });
+  drag(h2, (t) => { S.edit.end = round(Math.max(S.edit.start + 1, Math.min(t, S.data.duration || t))); });
+  lr.append(h1, h2);
+  // カット
+  const lc = $("lCut"); lc.innerHTML = "";
+  e.cuts.forEach(([a, b], i) => {
+    const c = el("blk cut", x(a), x(b) - x(a)); c.title = `${fmt(a)} – ${fmt(b)}`;
+    c.onclick = (ev) => { ev.stopPropagation(); commit((ed) => { ed.cuts.splice(i, 1); }); };
+    lc.appendChild(c);
+  });
+  // 字幕
+  const ls = $("lSub"); ls.innerHTML = "";
+  e.segments.forEach((s, i) => {
+    const b = el("blk sub" + (i === S.sel ? " sel" : ""), x(s[0]), x(s[1]) - x(s[0]), s[2]);
+    b.title = s[2];
+    moveBlock(b, i);
+    ls.appendChild(b);
+  });
+  // チャット
+  const lch = $("lChat"); lch.innerHTML = "";
+  for (const [o, u, t] of S.data.shorts[S.cur].chat) {
+    if (o < S.view[0] || o > S.view[1]) continue;
+    const d = el("chatdot", x(o)); d.title = `${u}: ${t}`; lch.appendChild(d);
+  }
+  drawHead(); syncForm(); renderList();
+}
+function drawHead() {
+  const v = $("src"); const t = S.src.offset + (v.currentTime || 0);
+  const lane = $("lRange"); $("ph").style.left = (lane.offsetLeft + x(t)) + "px";
+  $("time").textContent = fmt(t);
+  // プレビューの字幕・コメント (近似)
+  const s = S.edit.segments.find((g) => g[0] <= t && t < g[1]); $("ocap").textContent = s ? s[2] : "";
+  const oc = $("ochat"); oc.innerHTML = "";
+  if (S.edit.comments) {
+    const secs = S.data.render.comment_seconds, n = S.data.render.comment_lines;
+    S.data.shorts[S.cur].chat.filter(([o]) => o <= t && t - o < secs && o >= S.edit.start).slice(-n)
+      .forEach(([, u, m]) => { const d = document.createElement("div"); d.textContent = m; oc.appendChild(d); });
+  }
+}
+// つまみのドラッグ (ドラッグ中は履歴を 1 回だけ積む)
+function drag(handle, apply) {
+  handle.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault(); handle.setPointerCapture(ev.pointerId);
+    const before = clone(S.edit); const lane = $("lRange").getBoundingClientRect();
+    const move = (m) => { apply(tAt(m.clientX - lane.left)); draw(); };
+    const up = () => { handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", up);
+      if (JSON.stringify(before) !== JSON.stringify(S.edit)) { S.hist.push(before); S.fut = []; S.dirty = true; draw(); } };
+    handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", up);
+  });
+}
+function moveBlock(b, i) {
+  b.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault(); ev.stopPropagation(); S.sel = i; b.setPointerCapture(ev.pointerId);
+    const before = clone(S.edit); const lane = $("lSub").getBoundingClientRect();
+    const t0 = tAt(ev.clientX - lane.left); const [a0, b0] = S.edit.segments[i];
+    const move = (m) => { const d = tAt(m.clientX - lane.left) - t0;
+      S.edit.segments[i][0] = round(a0 + d); S.edit.segments[i][1] = round(b0 + d); draw(); };
+    const up = () => { b.removeEventListener("pointermove", move); b.removeEventListener("pointerup", up);
+      if (JSON.stringify(before) !== JSON.stringify(S.edit)) { S.hist.push(before); S.fut = []; S.dirty = true; }
+      syncForm(); draw(); };
+    b.addEventListener("pointermove", move); b.addEventListener("pointerup", up);
+    syncForm(); draw();
+  });
+}
+// カットの段: ドラッグした範囲をカットにする
+(function () {
+  const lane = $("lCut"); let a = null, ghost = null;
+  lane.addEventListener("pointerdown", (ev) => {
+    if (ev.target !== lane) return;
+    const r = lane.getBoundingClientRect(); a = tAt(ev.clientX - r.left); lane.setPointerCapture(ev.pointerId);
+    ghost = el("ghost", x(a), 2); lane.appendChild(ghost);
+  });
+  lane.addEventListener("pointermove", (ev) => {
+    if (a === null) return; const r = lane.getBoundingClientRect(); const b = tAt(ev.clientX - r.left);
+    ghost.style.left = x(Math.min(a, b)) + "px"; ghost.style.width = Math.abs(x(b) - x(a)) + "px";
+  });
+  lane.addEventListener("pointerup", (ev) => {
+    if (a === null) return; const r = lane.getBoundingClientRect(); const b = tAt(ev.clientX - r.left);
+    const lo = round(Math.max(Math.min(a, b), S.edit.start)), hi = round(Math.min(Math.max(a, b), S.edit.end)); a = null;
+    if (hi - lo >= 0.1) commit((e) => { e.cuts.push([lo, hi]); e.cuts = mergeCuts(e.cuts); }); else draw();
+  });
+})();
+function mergeCuts(cuts) { const out = [];
+  for (const c of cuts.slice().sort((p, q) => p[0] - q[0])) {
+    const last = out[out.length - 1]; if (last && c[0] <= last[1]) last[1] = Math.max(last[1], c[1]); else out.push(c.slice());
+  } return out; }
+$("lSub").addEventListener("dblclick", (ev) => {
+  if (ev.target !== $("lSub")) return; const r = $("lSub").getBoundingClientRect(); addSub(tAt(ev.clientX - r.left));
+});
+function addSub(t) {
+  t = round(t); commit((e) => { e.segments.push([t, round(t + 2), "…"]); e.segments.sort((p, q) => p[0] - q[0]); });
+  S.sel = S.edit.segments.findIndex((s) => s[0] === t); syncForm(); draw(); $("subText").focus(); $("subText").select();
+}
+$("lRuler").addEventListener("pointerdown", (ev) => {
+  const r = $("lRuler").getBoundingClientRect(); seek(tAt(ev.clientX - r.left));
+});
+function seek(t) { const v = $("src"); v.currentTime = Math.max(0, t - S.src.offset); drawHead(); }
+
+// --- 再生 (カットした所は飛ばす) ---
+function tick() {
+  const v = $("src");
+  if (!v.paused && S.edit) {
+    const t = S.src.offset + v.currentTime;
+    const c = S.edit.cuts.find(([a, b]) => a <= t && t < b);
+    if (c) v.currentTime = c[1] - S.src.offset;
+    if (S.rangeEnd !== null && t >= S.rangeEnd) { v.pause(); S.rangeEnd = null; }
+  }
+  if (S.edit) drawHead();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+function togglePlay() { const v = $("src"); if (v.paused) { S.rangeEnd = null; v.play(); } else v.pause(); }
+$("play").onclick = togglePlay;
+$("playRange").onclick = () => { seek(S.edit.start); S.rangeEnd = S.edit.end; $("src").play(); };
+$("addSub").onclick = () => {
+  // 再生位置が区間の外 (映像の準備前など) なら区間の頭に足す
+  const t = S.src.offset + ($("src").currentTime || 0);
+  addSub(t >= S.edit.start && t < S.edit.end ? t : S.edit.start);
+};
+$("clearCuts").onclick = () => { if (S.edit.cuts.length) commit((e) => { e.cuts = []; }); };
+$("silence").onclick = async () => {
+  status(tr("detecting"));
+  try { const r = await api("/api/silence", { i: S.cur, edit: S.edit }); commit((e) => { e.cuts = r.cuts; }); status(""); }
+  catch (e) { status(tr("error") + e.message, true); }
+};
+$("undo").onclick = undo; $("redo").onclick = redo;
+$("save").onclick = async () => {
+  try { const r = await api("/api/save", { i: S.cur, edit: S.edit }); S.data.shorts[S.cur].edit = r.edit; S.dirty = false; status(tr("saved")); }
+  catch (e) { status(tr("error") + e.message, true); }
+};
+$("render").onclick = async () => {
+  try {
+    await api("/api/render", { i: S.cur, edit: S.edit });
+    S.data.shorts[S.cur].edit = clone(S.edit); S.dirty = false; S.jobs[S.cur] = { status: "rendering" };
+    status(tr("rendering")); renderList(); poll();
+  } catch (e) { status(tr("error") + e.message, true); }
+};
+let polling = false;
+async function poll() {
+  if (polling) return; polling = true;
+  try {
+    while (true) {
+      await new Promise((ok) => setTimeout(ok, 1500));
+      const st = await api("/api/state");
+      S.jobs = st.jobs;
+      const busy = Object.values(st.jobs).some((j) => j.status === "rendering");
+      st.shorts.forEach((s, i) => { S.data.shorts[i].output = s.output; });
+      const j = S.jobs[S.cur];
+      if (j && j.status === "done") { status(tr("done")); setOutput(); }
+      if (j && j.status === "error") status(tr("error") + j.message, true);
+      renderList();
+      if (!busy) break;
+    }
+  } finally { polling = false; }
+}
+document.addEventListener("keydown", (ev) => {
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z" && !typing) { ev.preventDefault(); ev.shiftKey ? redo() : undo(); }
+  else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "y" && !typing) { ev.preventDefault(); redo(); }
+  else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") { ev.preventDefault(); $("save").click(); }
+  else if (ev.key === " " && !typing) { ev.preventDefault(); togglePlay(); }
+  else if ((ev.key === "Delete" || ev.key === "Backspace") && !typing) deleteSub();
+});
+window.addEventListener("resize", draw);
+window.addEventListener("beforeunload", (ev) => { if (S.dirty) { ev.preventDefault(); ev.returnValue = ""; } });
+
+// --- 表示言語 ---
+$("lang").addEventListener("change", async () => {
+  lang = $("lang").value; applyLang();
+  try { await api("/api/lang", { lang }); } catch (e) { status(tr("error") + e.message, true); }
+});
+
+(async function init() {
+  try {
+    S.data = await api("/api/state");
+    lang = S.data.lang; S.jobs = S.data.jobs || {};
+    for (const [k, v] of Object.entries(S.data.languages)) { const o = document.createElement("option"); o.value = k; o.textContent = v; $("lang").appendChild(o); }
+    $("lang").value = lang;
+    $("heading").textContent = [S.data.channel, S.data.stream_title].filter(Boolean).join(" — ") || "twitch-shorts";
+    applyLang();
+    if (S.data.shorts.length) await select(0);
+  } catch (e) { status(tr("error") + e.message, true); }
+})();
+</script>
+</body>
+</html>

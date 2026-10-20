@@ -181,7 +181,8 @@ def test_run_tray_menu_with_fake_pystray(tmp_path, monkeypatch):
         def run(self, setup):
             t = threading.Thread(target=setup, args=(self,), daemon=True)
             t.start()
-            item = {i.text: i for i in self.menu.items if isinstance(i.text, str)}
+            # 表示言語で変わる文字は関数になっている
+            item = {(i.text(i) if callable(i.text) else i.text): i for i in self.menu.items}
             auto = item["自動処理 (配信ごとにショートを作る)"]
             wait_for(lambda: procs and auto.checked(auto))  # 起動時に ON なので auto が動いている
             auto.action(self, None)  # OFF にする → 止めている途中
