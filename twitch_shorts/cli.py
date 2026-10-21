@@ -83,6 +83,25 @@ def _print_result(highlights) -> None:
 
 
 def cmd_vod(cfg: Config, args: argparse.Namespace) -> int:
+    """同じ VOD を 2 つの処理 (メニューから作る・まとめての作り直しなど) で同時に作らない (クリップが二重にできる)。"""
+    from .fileutil import file_lock
+    from .twitch_api import parse_video_id
+
+    if getattr(args, "require_ai", False):
+        cfg.llm.require = True
+    lock = file_lock(Path(cfg.work_dir) / f"vod_{parse_video_id(args.vod)}" / "making", timeout=0.5)
+    try:
+        lock.__enter__()
+    except TimeoutError:
+        log.error("この配信は別の処理で作成中です。終わってからもう一度試してください: %s", args.vod)
+        return 3
+    try:
+        return _make_from_vod(cfg, args)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _make_from_vod(cfg: Config, args: argparse.Namespace) -> int:
     from .chat import fetch_vod_chat, load_chat, save_chat_jsonl
     from .download import vod_url
     from .pipeline import VodSource, process
@@ -398,6 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--full-download", action="store_true", help="区間ごとでなく VOD 全体をダウンロード")
     sp.add_argument("--range", type=parse_range, action="append",
                     help="この区間だけをショートにする (例: 1:23:00-1:23:40)。複数指定できる")
+    sp.add_argument("--require-ai", action="store_true",
+                    help="AI が使えない (上限・混雑など) ときは作らずに止める ([llm] require と同じ)")
     add_render_opts(sp)
     sp.set_defaults(func=cmd_vod)
 

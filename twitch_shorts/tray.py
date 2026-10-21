@@ -23,7 +23,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .fileutil import file_lock, read_json, write_json_atomic
+from .fileutil import add_processed_vod, file_lock, processed_vods, read_json, write_json_atomic
 from .i18n import LANGUAGES, set_ui_language, tray_text, ui_language
 from .watcher import STOP_FILE_ENV
 
@@ -467,12 +467,64 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         if ctl.running():
             ctl.stop()  # 処理の途中なら、終わってからアイコンを閉じる (監視のスレッドが閉じる)
         refresh(icon)
-        if not ctl.running():
+        if making.locked():  # 途中で閉じると処理済みの印が付かず、あとで同じクリップを二重に作ってしまう
+            notify(icon, tray_text(lang(), "quit_wait"))
+        elif not ctl.running():
             close(icon)
 
     @in_background
     def kill_now(icon) -> None:
         ctl.kill()
+
+    making = threading.Lock()
+    archives: list = []  # 最近のアーカイブ (VOD)。メニューの「配信を選んで作る」に並べる
+
+    def load_archives() -> None:
+        try:
+            from .config import load_config
+            from .twitch_api import HelixClient
+
+            cfg = load_config(config_paths)
+            helix = HelixClient(cfg.twitch.client_id, cfg.twitch.client_secret)
+            archives[:] = helix.get_recent_archives(helix.get_user_id(channel), 15)
+        except Exception:
+            log.exception("アーカイブの一覧を取得できませんでした")
+
+    def reload_archives(icon) -> None:
+        """新しい配信が終わった・作り終わったときに一覧と ✓ を更新する (起動時の一覧のままにしない)。"""
+        threading.Thread(target=lambda: (load_archives(), icon.update_menu()), daemon=True).start()
+
+    def make(icon, video) -> None:
+        """選んだアーカイブ (VOD) から今すぐショートと Twitch クリップを作る。"""
+        if not making.acquire(blocking=False):
+            notify(icon, tray_text(lang(), "busy"))
+            return
+        try:
+            log_path = Path(work_dir) / "logs" / f"manual_{datetime.now():%Y%m%d_%H%M%S}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            notify(icon, tray_text(lang(), "making", title=video.title[:30]))
+            # AI が使えないときは作らない (AI 無しの公開クリップを作らないように)
+            cmd = ctl.command("vod", video.id, "--channel", channel, "--twitch-clips", "--require-ai")
+            with open(log_path, "ab") as f:
+                code = ctl.popen(cmd, cwd=ctl.cwd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                 env={**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"},
+                                 creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0).wait()
+            if code == 0:
+                add_processed_vod(work_dir, video.id)  # 自動処理・まとめての作り直しで二重に作らない
+            notify(icon, tray_text(lang(), {0: "done", 3: "in_use"}.get(code, "failed"), log=log_path.name))
+        finally:
+            making.release()
+            reload_archives(icon)
+
+    def archive_items():
+        if not archives:
+            yield pystray.MenuItem(text("loading"), None, enabled=False)
+            return
+        done = processed_vods(work_dir)
+        for v in archives:
+            title = v.title[:28].replace("&", "&&")  # Windows のメニューでは & が下線の印になる
+            label = f"{'✓ ' if v.id in done else ''}{v.created_at.astimezone():%m/%d} {title}"
+            yield pystray.MenuItem(label, in_background(lambda icon, v=v: make(icon, v)))
 
     languages = pystray.Menu(*[
         pystray.MenuItem(name, choose_language(code), checked=(lambda item, c=code: lang() == c), radio=True)
@@ -486,6 +538,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         pystray.MenuItem(text("startup"), toggle_startup,
                          checked=lambda item: startup_enabled(), visible=os.name == "nt"),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(text("make"), pystray.Menu(archive_items)),
         pystray.MenuItem(text("review"), open_review, default=True),
         pystray.MenuItem(text("editor"), open_editor),
         pystray.MenuItem(text("output"), open_output),
@@ -499,11 +552,16 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
 
     def watch_child(icon) -> None:
         icon.visible = True
+        reload_archives(icon)
+        reloaded = time.time()
         first = True
         while True:
             try:
                 if not first:
                     time.sleep(2)
+                if time.time() - reloaded > 15 * 60:  # 配信が終わって増えた VOD も並ぶように
+                    reload_archives(icon)
+                    reloaded = time.time()
                 changed = ctl.check()
                 if changed and ctl.error and not quitting.is_set():
                     notify(icon, tray_text(lang(), "stopped_notify", error=ctl.error))
@@ -512,7 +570,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
                 if changed or first:
                     refresh(icon)
                 first = False
-                if quitting.is_set() and not ctl.running():
+                if quitting.is_set() and not ctl.running() and not making.locked():
                     close(icon)
                     return
             except Exception:  # 1 回の失敗で監視をやめない
