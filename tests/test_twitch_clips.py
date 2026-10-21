@@ -2125,3 +2125,19 @@ def test_no_record_leftover_is_retried_longer(tmp_path, monkeypatch):
     for _ in range(8):
         watcher.process_leftovers(cfg, "yuuki_ftw", checker=_Checker(False, helix=object()))
     assert len(runs) == watcher.MAX_LEFTOVER_ATTEMPTS_NO_RECORDING
+
+
+def test_vod_command_refuses_same_vod_being_made(tmp_path):
+    """同じ VOD を 2 つの処理で同時に作らない (クリップが二重にできる)。--require-ai は AI 必須にする。"""
+    import argparse
+
+    from twitch_shorts.cli import cmd_vod
+    from twitch_shorts.config import Config
+    from twitch_shorts.fileutil import file_lock
+
+    cfg = Config()
+    cfg.work_dir = str(tmp_path)
+    args = argparse.Namespace(vod="2898756830", require_ai=True)
+    with file_lock(tmp_path / "vod_2898756830" / "making"):
+        assert cmd_vod(cfg, args) == 3
+    assert cfg.llm.require
