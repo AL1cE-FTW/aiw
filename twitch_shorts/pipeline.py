@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
@@ -158,7 +159,21 @@ def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
     return fill_template(cfg.render.title_template, _template_vars(h, index, channel))
 
 
-def process(
+def process(*args, **kwargs) -> RunResult:
+    """``_process`` を、作っている間だけ Windows をスリープさせずに実行する (予約で起こされたあと、途中で眠らないように)。"""
+    if os.name != "nt":
+        return _process(*args, **kwargs)
+    import ctypes
+
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    try:
+        return _process(*args, **kwargs)
+    finally:
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)  # 元に戻す (普段どおりスリープできる)
+
+
+def _process(
     cfg: Config,
     source: MediaSource,
     chat: list[ChatMessage],
