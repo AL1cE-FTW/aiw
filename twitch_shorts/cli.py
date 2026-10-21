@@ -141,7 +141,7 @@ def _make_from_vod(cfg: Config, args: argparse.Namespace) -> int:
     src = VodSource(url, work, quality=args.quality, full_download=args.full_download)
     result = process(cfg, src, chat, Path(cfg.output_dir) / f"{channel or 'vod'}_{video_id}",
                      duration=duration, clips=clips, channel=channel, stream_title=title, dry_run=args.dry_run,
-                     clip_vod=(video_id, 0.0), ranges=args.range,
+                     clip_vod=(video_id, 0.0), ranges=getattr(args, "range", None),  # latest から呼ぶときは無い
                      # API で持ち主を確認できないときは指定されたチャンネルを使う
                      # (違っていれば Twitch 側が拒否し、1 回で作成をやめる)
                      clip_owner=owner or channel)
