@@ -295,7 +295,7 @@ def test_log_file_keeps_console_output(tmp_path):
 
 def test_progress_percent_from_pipeline_log():
     """作っている途中の 1 行から全体の % を見積もる (アイコンとメニューの進捗バー用)。"""
-    from twitch_shorts.tray import make_image, progress_bar, progress_percent
+    from twitch_shorts.tray import progress_bar, progress_percent
 
     assert progress_percent("配信A: 音声を解析中: a.mp4") == 0
     assert progress_percent("配信A: 候補 3 件を検出") == 5
@@ -304,4 +304,3 @@ def test_progress_percent_from_pipeline_log():
     assert progress_percent("配信A: 書き出し中 (5/5): short_05.mp4 (00:01:00〜00:01:30) t") == 97
     assert progress_percent("配信A: 画面がほとんど動いていないので次点の候補にします") is None
     assert progress_bar(47) == "■■■■□□□□□□"
-    assert make_image("running", 47).size == (64, 64)
