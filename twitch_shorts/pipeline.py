@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import numpy as np
 from . import audio as audio_mod
 from .config import Config
 from .detector import detect_highlights, sample_chat, snap_to_transcript
+from .fileutil import PROGRESS_FILE
 from .models import ChatMessage, ClipRef, Highlight, TranscriptSegment, ViewerSample, normalize_hashtag
 from .render import render_highlight
 
@@ -159,18 +161,41 @@ def default_title(cfg: Config, h: Highlight, index: int, channel: str) -> str:
     return fill_template(cfg.render.title_template, _template_vars(h, index, channel))
 
 
-def process(*args, **kwargs) -> RunResult:
-    """``_process`` を、作っている間だけ Windows をスリープさせずに実行する (予約で起こされたあと、途中で眠らないように)。"""
-    if os.name != "nt":
-        return _process(*args, **kwargs)
-    import ctypes
 
+
+class _ProgressFile(logging.Handler):
+    """作っている間、このモジュールのログの最新の 1 行 (「書き出し中 (2/5)」など) を進捗としてファイルに書く。
+
+    タスクトレイがこれを読んで表示する。予約・メニュー・配信後の自動作成のどれで作っても同じファイル。
+    ponytail: 同時に 2 つ作っていると後に書いた方だけが見える (表示用なので十分)
+    """
+
+    def __init__(self, path: Path, title: str):
+        super().__init__(logging.INFO)
+        self.path, self.title = path, title
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.path.write_text(f"{self.title[:30]}: {record.getMessage()}"[:200], encoding="utf-8")
+        except OSError:  # 表示用なので書けなくても処理は続ける
+            pass
+
+
+def process(*args, **kwargs) -> RunResult:
+    """``_process`` を、進捗をファイルに書きながら、作っている間だけ Windows をスリープさせずに実行する
+    (予約で起こされたあと、途中で眠らないように)。"""
+    cfg = args[0] if args else kwargs["cfg"]
+    progress = _ProgressFile(Path(cfg.work_dir) / PROGRESS_FILE, kwargs.get("stream_title") or kwargs.get("channel") or "配信")
+    log.addHandler(progress)
+    set_state = ctypes.windll.kernel32.SetThreadExecutionState if os.name == "nt" else (lambda flags: None)
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
-    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    set_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
     try:
         return _process(*args, **kwargs)
     finally:
-        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)  # 元に戻す (普段どおりスリープできる)
+        set_state(ES_CONTINUOUS)  # 元に戻す (普段どおりスリープできる)
+        log.removeHandler(progress)
+        progress.path.unlink(missing_ok=True)
 
 
 def _process(

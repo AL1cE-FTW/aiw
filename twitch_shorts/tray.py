@@ -23,7 +23,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .fileutil import add_processed_vod, file_lock, processed_vods, read_json, write_json_atomic
+from .fileutil import PROGRESS_FILE, add_processed_vod, file_lock, processed_vods, read_json, write_json_atomic
 from .i18n import LANGUAGES, set_ui_language, tray_text, ui_language
 from .watcher import STOP_FILE_ENV
 
@@ -373,10 +373,23 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         except Exception:  # 通知に対応していない環境
             log.warning(message)
 
+    def progress() -> str:
+        """作っている途中なら、その進捗 (pipeline が書く)。30 分更新が無ければ止まった残りとみなして出さない。"""
+        path = Path(work_dir) / PROGRESS_FILE
+        try:
+            if time.time() - path.stat().st_mtime < 30 * 60:
+                return "▶ " + path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        return ""
+
+    def status_line(item=None) -> str:
+        return progress() or ctl.status_text(lang())
+
     def refresh(icon) -> None:
         status = ctl.status()
         icon.icon = make_image(status)
-        icon.title = f"twitch-shorts ({channel}): {ctl.status_text(lang())}"[:127]
+        icon.title = f"twitch-shorts ({channel}): {status_line()}"[:127]
         icon.update_menu()
 
     def in_background(fn):
@@ -531,7 +544,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         for code, name in LANGUAGES.items()
     ])
     menu = pystray.Menu(
-        pystray.MenuItem(lambda item: ctl.status_text(lang()), None, enabled=False),
+        pystray.MenuItem(status_line, None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(text("auto"), toggle_auto,
                          checked=auto_checked, enabled=lambda item: not quitting.is_set()),
@@ -554,6 +567,7 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         icon.visible = True
         reload_archives(icon)
         reloaded = time.time()
+        shown = ""  # 最後に表示した進捗 (変わったときだけ表示を更新する)
         first = True
         while True:
             try:
@@ -567,6 +581,8 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
                     notify(icon, tray_text(lang(), "stopped_notify", error=ctl.error))
                 if not quitting.is_set() and ctl.keep_alive():
                     changed = True
+                if progress() != shown:
+                    shown, changed = progress(), True
                 if changed or first:
                     refresh(icon)
                 first = False
