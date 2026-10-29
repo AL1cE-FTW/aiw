@@ -281,17 +281,45 @@ def _alert(message: str) -> None:
         ctypes.windll.user32.MessageBoxW(None, message, "twitch-shorts", 0x30)
 
 
-def make_image(status: str):
+def make_image(status: str, percent: int | None = None):
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.rounded_rectangle((2, 2, 62, 62), radius=14, fill=COLORS[status] + (255,))
+    if percent is not None:  # 作っている途中: 画面の形を少し上に詰めて、下に進捗バーを描く
+        d.rounded_rectangle((22, 6, 42, 40), radius=4, outline=(255, 255, 255, 255), width=4)
+        d.rectangle((8, 47, 56, 57), fill=(0, 0, 0, 160))
+        d.rectangle((8, 47, 8 + 48 * percent // 100, 57), fill=(255, 255, 255, 255))
+        return img
     # 縦長の画面 (ショート) の形
     d.rounded_rectangle((22, 12, 42, 52), radius=4, outline=(255, 255, 255, 255), width=4)
     if status == "running":
         d.polygon([(29, 25), (29, 39), (38, 32)], fill=(255, 255, 255, 255))
     return img
+
+
+# 作るときの段階 (pipeline のログの言葉) と、全体のうちその段階が占める範囲 (%)
+# ponytail: 範囲は手元の配信で測ったおおよその時間の割合。段階の時間が大きく変わったら見直す
+PROGRESS_STAGES = [
+    ("音声を解析", 0, 5), ("件を検出", 5, 7), ("場面を探して", 7, 30), ("場面を選びました", 30, 32),
+    ("文字起こし", 32, 40), ("映像を用意", 32, 62), ("候補を評価", 62, 72), ("書き出し", 72, 97),
+    ("確認ページ", 97, 100),
+]
+
+
+def progress_percent(text: str) -> int | None:
+    """進捗の 1 行から全体の何 % かを見積もる (「書き出し中 (2/5)」なら書き出しの範囲の 2/5)。分からなければ None。"""
+    for word, lo, hi in PROGRESS_STAGES:
+        if word in text:
+            m = re.search(r"\((\d+)/(\d+)\)", text)
+            frac = int(m.group(1)) / max(1, int(m.group(2))) if m else 0.0
+            return round(lo + (hi - lo) * min(1.0, frac))
+    return None
+
+
+def progress_bar(percent: int) -> str:
+    return "■" * (percent // 10) + "□" * (10 - percent // 10)
 
 
 def _windows_browser() -> str | None:
@@ -373,22 +401,37 @@ def run_tray(channel: str, work_dir: str, output_dir: str, config_paths: list[st
         except Exception:  # 通知に対応していない環境
             log.warning(message)
 
+    last_percent = [0]  # 段階の分からない行 (「画面が動いていないので次点に」など) では前の % のまま
+
     def progress() -> str:
         """作っている途中なら、その進捗 (pipeline が書く)。30 分更新が無ければ止まった残りとみなして出さない。"""
         path = Path(work_dir) / PROGRESS_FILE
         try:
             if time.time() - path.stat().st_mtime < 30 * 60:
-                return "▶ " + path.read_text(encoding="utf-8")
+                return path.read_text(encoding="utf-8")
         except OSError:
             pass
         return ""
 
+    def percent(text: str) -> int | None:
+        if not text:
+            last_percent[0] = 0
+            return None
+        p = progress_percent(text)
+        if p is not None:
+            last_percent[0] = p
+        return last_percent[0]
+
     def status_line(item=None) -> str:
-        return progress() or ctl.status_text(lang())
+        text = progress()
+        if not text:
+            return ctl.status_text(lang())
+        p = percent(text)
+        return f"▶ {progress_bar(p)} {p}%  {text}"
 
     def refresh(icon) -> None:
         status = ctl.status()
-        icon.icon = make_image(status)
+        icon.icon = make_image(status, percent(progress()))
         icon.title = f"twitch-shorts ({channel}): {status_line()}"[:127]
         icon.update_menu()
 

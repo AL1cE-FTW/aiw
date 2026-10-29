@@ -439,7 +439,8 @@ def _process(
         if dry_run:
             continue
         out = run_dir / f"short_{i:02d}_{_hms(h.start)}.mp4"
-        log.info("書き出し中: %s (%s〜%s) %s", out.name, _hms(h.start, ":"), _hms(h.end, ":"), h.title)
+        log.info("書き出し中 (%d/%d): %s (%s〜%s) %s", i - start_index + 1, len(selected), out.name,
+                 _hms(h.start, ":"), _hms(h.end, ":"), h.title)
         try:
             video, offset = videos_of.get(id(h)) or source.video_for(h.start, h.end)
             render_highlight(video, str(out), h, cfg.render, transcripts.get(id(h)), source_offset=offset,
