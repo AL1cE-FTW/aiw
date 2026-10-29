@@ -186,3 +186,28 @@ def test_ai_scan_and_signal_candidates_are_ordered_by_score(make_stream, tmp_pat
     # AI の評価に失敗しても、点数の低い AI の場面が先頭に来て選ばれることはない
     [h] = r.highlights
     assert h.title != "微妙" and h.start < 60
+
+
+def test_progress_file_shows_latest_step_and_is_removed(tmp_path, monkeypatch):
+    """作っている間はログの最新の 1 行が progress.txt に出て (タスクトレイが表示する)、終わったら消える。"""
+    import logging
+
+    from twitch_shorts import pipeline
+    from twitch_shorts.config import Config
+
+    seen = {}
+
+    def fake_process(cfg, *a, **k):
+        pipeline.log.info("書き出し中 (%d/%d)", 2, 5)
+        seen["text"] = (tmp_path / "progress.txt").read_text(encoding="utf-8")
+        return "ok"
+
+    monkeypatch.setattr(pipeline, "_process", fake_process)
+    before = pipeline.log.level
+    pipeline.log.setLevel(logging.INFO)
+    try:
+        assert pipeline.process(Config(work_dir=str(tmp_path)), None, [], tmp_path / "o", stream_title="配信A") == "ok"
+    finally:
+        pipeline.log.setLevel(before)
+    assert seen["text"] == "配信A: 書き出し中 (2/5)"
+    assert not (tmp_path / "progress.txt").exists()

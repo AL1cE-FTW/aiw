@@ -87,6 +87,8 @@ def read_json(path: str | Path, default=None):
 
 # latest / auto で処理済みの VOD の ID の一覧 (work_dir 直下)
 PROCESSED_VODS = "processed_vods.json"
+# 作っている間の進捗 (pipeline が書き、タスクトレイが表示する)
+PROGRESS_FILE = "progress.txt"
 
 
 def processed_vods(work_dir: str | Path) -> set[str]:
